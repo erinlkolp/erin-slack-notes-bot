@@ -1,2 +1,2 @@
-slack-bolt
-mysql-connector-python
+slack-bolt==1.27.0
+mysql-connector-python==9.6.0

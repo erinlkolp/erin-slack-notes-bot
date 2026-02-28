@@ -1,14 +1,21 @@
 import os
 import logging
+import time
 import mysql.connector
 from mysql.connector import Error
+from collections import defaultdict
 from datetime import datetime
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-# Set up logging to see what's happening
-logging.basicConfig(level=logging.DEBUG)
+# Set up logging - configurable via environment variable
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 logger = logging.getLogger(__name__)
+
+MAX_NOTE_LENGTH = 4000
+RATE_LIMIT_SECONDS = 5
+_last_command_time = defaultdict(float)
 
 # Print environment variables for debugging (without exposing tokens)
 print("🔍 Checking environment variables...")
@@ -21,7 +28,7 @@ allowed_user_id = os.environ.get("ALLOWED_SLACK_USER_ID")
 print(f"SLACK_BOT_TOKEN: {'✅ Set' if bot_token else '❌ Missing'}")
 print(f"SLACK_SIGNING_SECRET: {'✅ Set' if signing_secret else '❌ Missing'}")
 print(f"SLACK_APP_TOKEN: {'✅ Set' if app_token else '❌ Missing'}")
-print(f"ALLOWED_SLACK_USER_ID: {'✅ Set (' + allowed_user_id + ')' if allowed_user_id else '❌ Missing'}")
+print(f"ALLOWED_SLACK_USER_ID: {'✅ Set' if allowed_user_id else '❌ Missing'}")
 
 # Check MySQL environment variables
 mysql_host = os.environ.get("MYSQL_HOST", "localhost")
@@ -124,6 +131,16 @@ def setup_database():
         if connection and connection.is_connected():
             cursor.close()
             connection.close()
+
+def check_rate_limit(user_id, command_name):
+    """Returns True if the user is rate-limited, False if allowed."""
+    key = f"{user_id}:{command_name}"
+    now = time.monotonic()
+    last = _last_command_time[key]
+    if now - last < RATE_LIMIT_SECONDS:
+        return True
+    _last_command_time[key] = now
+    return False
 
 def save_note(user_id, username, note_text, channel_id=None, channel_name=None):
     """Save a note to the database"""
@@ -235,6 +252,10 @@ def handle_take_notes(ack, respond, command, client, logger):
             respond("🚫 Sorry, this bot is restricted to a specific user.")
             return
 
+        if check_rate_limit(user_id, "take_notes"):
+            respond("⏳ Please wait a few seconds before sending another command.")
+            return
+
         user_name = command.get('user_name', 'Unknown')
         note_text = command.get('text', '').strip()
         channel_id = command.get('channel_id')
@@ -250,6 +271,10 @@ def handle_take_notes(ack, respond, command, client, logger):
         
         if not note_text:
             respond("❌ Please provide some text to save as a note.\nUsage: `/take_notes Your note text here`")
+            return
+
+        if len(note_text) > MAX_NOTE_LENGTH:
+            respond(f"❌ Note is too long ({len(note_text)} characters). Maximum is {MAX_NOTE_LENGTH} characters.")
             return
         
         # Save the note to database
@@ -281,6 +306,10 @@ def handle_my_notes(ack, respond, command, logger):
         # Only respond to the allowed user
         if user_id != allowed_user_id:
             respond("🚫 Sorry, this bot is restricted to a specific user.")
+            return
+
+        if check_rate_limit(user_id, "my_notes"):
+            respond("⏳ Please wait a few seconds before sending another command.")
             return
 
         user_name = command.get('user_name', 'Unknown')
@@ -341,7 +370,7 @@ def handle_my_notes(ack, respond, command, logger):
 @app.error
 def global_error_handler(error, body, logger):
     logger.error(f"Global error: {error}")
-    logger.error(f"Request body: {body}")
+    logger.debug(f"Request body: {body}")
 
 def main():
     """Main function to start the bot"""
