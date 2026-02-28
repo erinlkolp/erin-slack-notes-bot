@@ -9,5 +9,6 @@ CREATE TABLE IF NOT EXISTS notes (
     note_text TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     channel_id VARCHAR(255),
-    channel_name VARCHAR(255)
+    channel_name VARCHAR(255),
+    INDEX idx_user_created (user_id, created_at)
 );

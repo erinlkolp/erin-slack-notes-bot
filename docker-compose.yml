@@ -1,7 +1,7 @@
 services:
   slackbot:
     container_name: slackbot
-    image: ekolp/slackbot:dev
+    image: ekolp/slackbot:latest
     platform: linux/amd64
     build:
       context: .
@@ -9,8 +9,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    env_file:
-      - .env
+    environment:
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN}
+      ALLOWED_SLACK_USER_ID: ${ALLOWED_SLACK_USER_ID}
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
   db:
     container_name: db
@@ -26,7 +35,7 @@ services:
       - my-db:/var/lib/mysql
       - ./slackbotdb.sql:/docker-entrypoint-initdb.d/1.sql # Seeds the database schema
     healthcheck:
-      test: ["CMD-SHELL", "netstat -ltn | grep -c 3306"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 15s
       timeout: 5s
       retries: 5
