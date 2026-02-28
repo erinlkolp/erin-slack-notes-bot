@@ -9,6 +9,7 @@ services:
       SLACK_BOT_TOKEN: ''
       SLACK_SIGNING_SECRET: ''
       SLACK_APP_TOKEN: ''
+      ALLOWED_SLACK_USER_ID: ''  # Your Slack user ID (e.g. U12345678)
       MYSQL_HOST: db
       MYSQL_PORT: 3306
       MYSQL_USER: root
