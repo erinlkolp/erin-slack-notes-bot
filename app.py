@@ -16,9 +16,12 @@ bot_token = os.environ.get("SLACK_BOT_TOKEN")
 signing_secret = os.environ.get("SLACK_SIGNING_SECRET")
 app_token = os.environ.get("SLACK_APP_TOKEN")
 
+allowed_user_id = os.environ.get("ALLOWED_SLACK_USER_ID")
+
 print(f"SLACK_BOT_TOKEN: {'✅ Set' if bot_token else '❌ Missing'}")
 print(f"SLACK_SIGNING_SECRET: {'✅ Set' if signing_secret else '❌ Missing'}")
 print(f"SLACK_APP_TOKEN: {'✅ Set' if app_token else '❌ Missing'}")
+print(f"ALLOWED_SLACK_USER_ID: {'✅ Set (' + allowed_user_id + ')' if allowed_user_id else '❌ Missing'}")
 
 # Check MySQL environment variables
 mysql_host = os.environ.get("MYSQL_HOST", "localhost")
@@ -33,12 +36,13 @@ print(f"MYSQL_DATABASE: {'✅ Set' if mysql_database else '❌ Missing'}")
 print(f"MYSQL_USER: {'✅ Set' if mysql_user else '❌ Missing'}")
 print(f"MYSQL_PASSWORD: {'✅ Set' if mysql_password else '❌ Missing'}")
 
-if not all([bot_token, signing_secret, app_token]):
+if not all([bot_token, signing_secret, app_token, allowed_user_id]):
     print("❌ Missing required Slack environment variables!")
     print("\nPlease set:")
     print("export SLACK_BOT_TOKEN='xoxb-your-bot-token'")
     print("export SLACK_SIGNING_SECRET='your-signing-secret'")
     print("export SLACK_APP_TOKEN='xapp-your-app-token'")
+    print("export ALLOWED_SLACK_USER_ID='U12345678'  # Your Slack user ID")
     exit(1)
 
 if not all([mysql_database, mysql_user, mysql_password]):
@@ -168,10 +172,15 @@ def handle_message_events(message, say, logger):
         user_id = message.get('user')
         text = message.get('text', '')
         channel = message.get('channel')
-        
+
         # Skip messages from bots (including this bot)
         if message.get('bot_id') or message.get('subtype') == 'bot_message':
             print("🤖 Skipping bot message")
+            return
+
+        # Only respond to the allowed user
+        if user_id != allowed_user_id:
+            print(f"🚫 Ignoring message from unauthorized user: {user_id}")
             return
         
         print(f"👤 User: {user_id}, 📝 Text: '{text}', 📍 Channel: {channel}")
@@ -193,9 +202,14 @@ def handle_mentions(event, say, logger):
     try:
         user = event.get('user')
         text = event.get('text', '')
-        
+
+        # Only respond to the allowed user
+        if user != allowed_user_id:
+            logger.info(f"Ignoring mention from unauthorized user: {user}")
+            return
+
         logger.info(f"Bot mentioned by user {user}: {text}")
-        
+
         # Clean up the mention from the text
         clean_text = text.split('>', 1)[-1].strip() if '>' in text else text
         
@@ -213,8 +227,14 @@ def handle_take_notes(ack, respond, command, client, logger):
     """Handle /take_notes command"""
     try:
         ack()  # Must acknowledge the command
-        
+
         user_id = command.get('user_id')
+
+        # Only respond to the allowed user
+        if user_id != allowed_user_id:
+            respond("🚫 Sorry, this bot is restricted to a specific user.")
+            return
+
         user_name = command.get('user_name', 'Unknown')
         note_text = command.get('text', '').strip()
         channel_id = command.get('channel_id')
@@ -255,8 +275,14 @@ def handle_my_notes(ack, respond, command, logger):
     """Handle /my_notes command to retrieve user's recent notes"""
     try:
         ack()
-        
+
         user_id = command.get('user_id')
+
+        # Only respond to the allowed user
+        if user_id != allowed_user_id:
+            respond("🚫 Sorry, this bot is restricted to a specific user.")
+            return
+
         user_name = command.get('user_name', 'Unknown')
         limit_text = command.get('text', '5').strip()
         
