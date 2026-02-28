@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import signal
 import sys
@@ -16,6 +17,7 @@ logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 logger = logging.getLogger(__name__)
 
 MAX_NOTE_LENGTH = 4000
+NOTES_PER_PAGE = 5
 RATE_LIMIT_SECONDS = 5
 RATE_LIMIT_MAX_ENTRIES = 1000
 _last_command_time = defaultdict(float)
@@ -189,6 +191,104 @@ def save_note(user_id, username, note_text, channel_id=None, channel_name=None):
         if connection and connection.is_connected():
             connection.close()
 
+def get_notes_page(user_id, page, per_page):
+    """Fetch a single page of notes for a user. Returns (notes_list, total_count)."""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return None, 0
+
+        cursor = connection.cursor()
+
+        # Get total count
+        cursor.execute("SELECT COUNT(*) FROM notes WHERE user_id = %s", (user_id,))
+        total_count = cursor.fetchone()[0]
+
+        # Get the requested page
+        offset = (page - 1) * per_page
+        cursor.execute(
+            "SELECT id, note_text, created_at, channel_name "
+            "FROM notes WHERE user_id = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (user_id, per_page, offset),
+        )
+        notes = cursor.fetchall()
+
+        return notes, total_count
+
+    except Error as e:
+        logger.error(f"Database error in get_notes_page: {e}")
+        return None, 0
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def build_notes_blocks(notes, page, per_page, total_count):
+    """Build Slack Block Kit blocks for a page of notes with navigation."""
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Your Notes"},
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Page {page} of {total_pages}  |  {total_count} notes total  |  {per_page} per page",
+                }
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    for note_id, note_text, created_at, channel_name in notes:
+        display_text = note_text if len(note_text) <= 200 else note_text[:197] + "..."
+        channel_info = f"  #{channel_name}" if channel_name else ""
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*#{note_id}* — {created_at.strftime('%m/%d/%Y %H:%M')}{channel_info}\n{display_text}",
+                },
+            }
+        )
+        blocks.append({"type": "divider"})
+
+    # Navigation buttons
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "< Previous"},
+                "action_id": "notes_prev_page",
+                "value": json.dumps({"page": page - 1, "per_page": per_page}),
+            }
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Next >"},
+                "action_id": "notes_next_page",
+                "value": json.dumps({"page": page + 1, "per_page": per_page}),
+            }
+        )
+
+    if nav_buttons:
+        blocks.append({"type": "actions", "elements": nav_buttons})
+
+    return blocks
+
+
 # Test database connection and setup
 logger.info("Testing database connection...")
 if setup_database():
@@ -302,81 +402,91 @@ def handle_take_notes(ack, respond, command, client, logger):
         respond("❌ An error occurred while saving your note. Please try again.")
 
 # Add a command to retrieve recent notes
-@app.command("/my_notes")  
+@app.command("/my_notes")
 def handle_my_notes(ack, respond, command, logger):
-    """Handle /my_notes command to retrieve user's recent notes"""
+    """Handle /my_notes command to retrieve user's notes with pagination.
+
+    Usage:
+        /my_notes          - show page 1 (default 5 per page)
+        /my_notes 10       - show page 1 with 10 per page
+    """
     try:
         ack()
 
         user_id = command.get('user_id')
 
-        # Only respond to the allowed user
         if user_id != allowed_user_id:
-            respond("🚫 Sorry, this bot is restricted to a specific user.")
+            respond("Sorry, this bot is restricted to a specific user.")
             return
 
         if check_rate_limit(user_id, "my_notes"):
-            respond("⏳ Please wait a few seconds before sending another command.")
+            respond("Please wait a few seconds before sending another command.")
             return
 
         user_name = command.get('user_name', 'Unknown')
-        limit_text = command.get('text', '5').strip()
-        
-        # Parse limit (default to 5)
+        text = command.get('text', '').strip()
+
+        # Parse optional per_page from command text (default NOTES_PER_PAGE)
         try:
-            limit = int(limit_text) if limit_text.isdigit() else 5
-            limit = min(limit, 20)  # Cap at 20 notes
+            per_page = int(text) if text.isdigit() else NOTES_PER_PAGE
+            per_page = max(1, min(per_page, 20))
         except (ValueError, TypeError):
-            limit = 5
-        
-        # Get user's recent notes
-        connection = None
-        cursor = None
-        try:
-            connection = get_db_connection()
-            if connection is None:
-                respond("❌ Database connection error")
-                return
+            per_page = NOTES_PER_PAGE
 
-            cursor = connection.cursor()
+        page = 1
+        notes, total_count = get_notes_page(user_id, page, per_page)
 
-            query = """
-            SELECT id, note_text, created_at, channel_name
-            FROM notes
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-            LIMIT %s
-            """
+        if notes is None:
+            respond("Database connection error.")
+            return
 
-            cursor.execute(query, (user_id, limit))
-            notes = cursor.fetchall()
+        if not notes:
+            respond(f"No notes found for {user_name}.")
+            return
 
-            if not notes:
-                respond(f"📝 No notes found for {user_name}")
-                return
+        blocks = build_notes_blocks(notes, page, per_page, total_count)
+        respond(blocks=blocks)
 
-            response = f"📚 Your last {len(notes)} notes:\n\n"
-
-            for note_id, note_text, created_at, channel_name in notes:
-                # Truncate long notes
-                display_text = note_text if len(note_text) <= 100 else note_text[:97] + "..."
-                channel_info = f" (#{channel_name})" if channel_name else ""
-                response += f"**#{note_id}** - {created_at.strftime('%m/%d %H:%M')}{channel_info}\n{display_text}\n\n"
-
-            respond(response)
-
-        except Error as e:
-            logger.error(f"Database error retrieving notes: {e}")
-            respond("❌ Error retrieving notes from database")
-        finally:
-            if cursor:
-                cursor.close()
-            if connection and connection.is_connected():
-                connection.close()
-                
     except Exception as e:
         logger.error(f"Error handling /my_notes command: {e}")
-        respond("❌ An error occurred while retrieving your notes.")
+        respond("An error occurred while retrieving your notes.")
+
+
+@app.action("notes_prev_page")
+@app.action("notes_next_page")
+def handle_notes_pagination(ack, body, client, logger):
+    """Handle Previous / Next button clicks for note pagination."""
+    try:
+        ack()
+
+        user_id = body["user"]["id"]
+        if user_id != allowed_user_id:
+            return
+
+        action = body["actions"][0]
+        payload = json.loads(action["value"])
+        page = payload["page"]
+        per_page = payload["per_page"]
+
+        notes, total_count = get_notes_page(user_id, page, per_page)
+
+        if notes is None:
+            return
+
+        blocks = build_notes_blocks(notes, page, per_page, total_count)
+
+        # Update the existing message in place
+        client.chat_update(
+            channel=body["channel"]["id"],
+            ts=body["message"]["ts"],
+            blocks=blocks,
+            text="Your Notes",
+        )
+
+    except Exception as e:
+        logger.error(f"Error handling notes pagination: {e}")
+
+
 @app.error
 def global_error_handler(error, body, logger):
     logger.error(f"Global error: {error}")
