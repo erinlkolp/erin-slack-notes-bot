@@ -230,6 +230,24 @@ class TestRequireAllowedUser:
         decorated(ack=MagicMock(), respond=MagicMock(), body={"user": {"id": "U_ALLOWED"}})
         inner.assert_called_once()
 
+    def test_view_authorized_user_proceeds_without_pre_ack(self):
+        """For view handlers, the decorator must NOT pre-ack so the handler controls ack."""
+        inner = MagicMock()
+        ack = MagicMock()
+        decorated = middleware.require_allowed_user(is_view=True)(inner)
+        decorated(ack=ack, body={"user": {"id": "U_ALLOWED"}})
+        inner.assert_called_once()
+        ack.assert_not_called()
+
+    def test_view_unauthorized_user_is_acked_and_blocked(self):
+        """For view handlers, unauthorized submission must be ack()d (modal dismissed) and blocked."""
+        inner = MagicMock()
+        ack = MagicMock()
+        decorated = middleware.require_allowed_user(is_view=True)(inner)
+        decorated(ack=ack, body={"user": {"id": "U_OTHER"}})
+        inner.assert_not_called()
+        ack.assert_called_once()
+
 
 # ── init_db_pool ─────────────────────────────────────────────────────────────
 

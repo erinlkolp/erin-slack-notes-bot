@@ -261,14 +261,11 @@ def register_handlers(app):
             respond("❌ An error occurred while opening the edit modal. Please try again.")
 
     @app.view("edit_note_modal")
+    @require_allowed_user(is_view=True)
     def handle_edit_note_modal(ack, body, view, client, logger):
         """Handle submission of the edit-note modal."""
         try:
             user_id = body["user"]["id"]
-
-            if user_id != allowed_user_id:
-                ack()
-                return
 
             metadata = json.loads(view["private_metadata"])
             note_id = metadata["note_id"]
