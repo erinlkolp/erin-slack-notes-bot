@@ -14,4 +14,4 @@ EXPOSE 8080
 
 STOPSIGNAL SIGTERM
 
-CMD ["python", "app.py"]
+CMD ["python", "-m", "app.main"]

@@ -4,7 +4,7 @@ import functools
 import logging
 from collections import defaultdict
 
-from config import RATE_LIMIT_SECONDS, RATE_LIMIT_MAX_ENTRIES
+from .config import RATE_LIMIT_SECONDS, RATE_LIMIT_MAX_ENTRIES
 
 logger = logging.getLogger(__name__)
 

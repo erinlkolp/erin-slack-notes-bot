@@ -3,8 +3,8 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from config import HEALTH_CHECK_PORT
-from database import get_db_connection
+from .config import HEALTH_CHECK_PORT
+from .database import get_db_connection
 
 logger = logging.getLogger(__name__)
 

@@ -2,7 +2,7 @@ import re
 import logging
 from mysql.connector import Error
 
-from database import get_db_connection
+from .database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
