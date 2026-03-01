@@ -30,14 +30,18 @@ def check_rate_limit(user_id, command_name):
     return False
 
 
-def require_allowed_user(command_name=None):
+def require_allowed_user(command_name=None, is_view=False):
     """Decorator that enforces single-user authorization and optional rate limiting.
 
-    Works for both slash-command handlers (ack/respond/command) and action
-    handlers (ack/respond/body).
+    Works for slash-command handlers (ack/respond/command), action handlers
+    (ack/respond/body), and modal view handlers (ack/body/view).
 
     Args:
         command_name: If provided, rate-limiting is applied using this key.
+        is_view: Set True for @app.view handlers.  The decorator will NOT
+                 pre-ack so the handler can return its own response_action
+                 (e.g. validation errors).  Unauthorized submissions are
+                 silently dismissed via ack().
     """
     def decorator(fn):
         @functools.wraps(fn)
@@ -54,11 +58,13 @@ def require_allowed_user(command_name=None):
             else:
                 user_id = None
 
-            if ack:
+            if not is_view and ack:
                 ack()
 
             if user_id != allowed_user_id:
-                if respond:
+                if is_view and ack:
+                    ack()  # dismiss the modal silently for unauthorized submissions
+                elif respond:
                     respond("🚫 Sorry, this bot is restricted to a specific user.")
                 return
 
