@@ -109,6 +109,48 @@ class TestBuildNotesBlocks:
         payload = json.loads(action_blocks[0]["elements"][0]["value"])
         assert payload == {"page": 2, "per_page": 5}
 
+    def test_note_text_mentions_are_escaped(self):
+        """Slack mention/broadcast syntax in note text must be escaped in mrkdwn output."""
+        now = datetime(2025, 6, 15, 10, 30)
+        note_text = "ping <!here> and <@U12345> about <#C99999|general> & updates"
+        result = blocks.build_notes_blocks([(1, note_text, now, None)], page=1, per_page=5, total_count=1)
+        section = [b for b in result if b.get("type") == "section"][0]
+        display = section["text"]["text"]
+        assert "<!here>" not in display
+        assert "<@U12345>" not in display
+        assert "<#C99999|general>" not in display
+        assert "&lt;!here&gt;" in display
+        assert "&lt;@U12345&gt;" in display
+        assert "&amp;" in display
+
+
+# ── escape_mrkdwn ─────────────────────────────────────────────────────────────
+
+
+class TestEscapeMrkdwn:
+    def test_user_mention(self):
+        assert blocks.escape_mrkdwn("<@U12345>") == "&lt;@U12345&gt;"
+
+    def test_broadcast_here(self):
+        assert blocks.escape_mrkdwn("<!here>") == "&lt;!here&gt;"
+
+    def test_broadcast_channel(self):
+        assert blocks.escape_mrkdwn("<!channel>") == "&lt;!channel&gt;"
+
+    def test_broadcast_everyone(self):
+        assert blocks.escape_mrkdwn("<!everyone>") == "&lt;!everyone&gt;"
+
+    def test_ampersand_escaped_first(self):
+        # & must be replaced before < and > to avoid double-escaping
+        assert blocks.escape_mrkdwn("a & b") == "a &amp; b"
+        assert blocks.escape_mrkdwn("&lt;") == "&amp;lt;"
+
+    def test_plain_text_unchanged(self):
+        assert blocks.escape_mrkdwn("hello world #tag") == "hello world #tag"
+
+    def test_empty_string(self):
+        assert blocks.escape_mrkdwn("") == ""
+
 
 # ── check_rate_limit ─────────────────────────────────────────────────────────
 
