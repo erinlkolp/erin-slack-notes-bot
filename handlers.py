@@ -18,7 +18,7 @@ from tags import (
     parse_tags,
     save_tags,
 )
-from blocks import build_notes_blocks
+from blocks import build_edit_note_modal, build_notes_blocks
 from middleware import allowed_user_id, require_allowed_user
 
 logger = logging.getLogger(__name__)
@@ -224,41 +224,84 @@ def register_handlers(app):
 
     @app.command("/edit_note")
     @require_allowed_user(command_name="edit_note")
-    def handle_edit_note(ack, respond, command, logger):
-        """Edit an existing note.  Usage: /edit_note <note_id> <new text>"""
+    def handle_edit_note(ack, respond, command, client, logger):
+        """Open a modal to edit a note.  Usage: /edit_note <note_id>"""
         try:
             user_id = command.get("user_id")
             text = command.get("text", "").strip()
 
-            parts = text.split(None, 1)
-            if len(parts) < 2:
+            if not text:
                 respond(
-                    "❌ Usage: `/edit_note <note_id> <new text>`\n"
-                    "Example: `/edit_note 42 Updated note content`"
+                    "❌ Please provide a note ID.\n"
+                    "Usage: `/edit_note <note_id>`"
                 )
                 return
 
             try:
-                note_id = int(parts[0])
+                note_id = int(text.split()[0])
             except ValueError:
-                respond("❌ Invalid note ID. Usage: `/edit_note <note_id> <new text>`")
+                respond("❌ Invalid note ID. Usage: `/edit_note <note_id>`")
                 return
 
-            new_text = parts[1]
+            note = get_note_by_id(note_id, user_id)
+            if note is None:
+                respond(f"❌ Note #{note_id} not found or doesn't belong to you.")
+                return
+
+            current_text = note[1]
+            channel_id = command.get("channel_id", "")
+
+            client.views_open(
+                trigger_id=command["trigger_id"],
+                view=build_edit_note_modal(note_id, current_text, channel_id),
+            )
+
+        except Exception as e:
+            logger.error(f"Error handling /edit_note command: {e}")
+            respond("❌ An error occurred while opening the edit modal. Please try again.")
+
+    @app.view("edit_note_modal")
+    def handle_edit_note_modal(ack, body, view, client, logger):
+        """Handle submission of the edit-note modal."""
+        try:
+            user_id = body["user"]["id"]
+
+            if user_id != allowed_user_id:
+                ack()
+                return
+
+            metadata = json.loads(view["private_metadata"])
+            note_id = metadata["note_id"]
+            channel_id = metadata.get("channel_id") or user_id
+
+            new_text = view["state"]["values"]["note_text_block"]["note_text"]["value"]
 
             if len(new_text) > MAX_NOTE_LENGTH:
-                respond(
-                    f"❌ Note is too long ({len(new_text)} characters). "
-                    f"Maximum is {MAX_NOTE_LENGTH} characters."
+                ack(
+                    response_action="errors",
+                    errors={
+                        "note_text_block": (
+                            f"Note is too long ({len(new_text)} characters). "
+                            f"Maximum is {MAX_NOTE_LENGTH} characters."
+                        )
+                    },
                 )
                 return
 
             if get_note_by_id(note_id, user_id) is None:
-                respond(f"❌ Note #{note_id} not found or doesn't belong to you.")
+                ack(
+                    response_action="errors",
+                    errors={
+                        "note_text_block": f"Note #{note_id} not found or doesn't belong to you."
+                    },
+                )
                 return
 
             if not update_note(note_id, user_id, new_text):
-                respond("❌ Failed to update note. Please try again.")
+                ack(
+                    response_action="errors",
+                    errors={"note_text_block": "Failed to update note. Please try again."},
+                )
                 return
 
             delete_tags_for_note(note_id)
@@ -266,15 +309,21 @@ def register_handlers(app):
             if tags:
                 save_tags(note_id, tags)
 
-            response = f"✅ Note #{note_id} updated successfully!\n📄 New text: \"{new_text}\""
+            ack()
+
+            confirmation = f"✅ Note #{note_id} updated successfully!\n📄 New text: \"{new_text}\""
             if tags:
-                response += f"\n🏷️ Tags: {', '.join('#' + t for t in tags)}"
-            respond(response)
-            logger.info(f"Note {note_id} updated by user {user_id}")
+                confirmation += f"\n🏷️ Tags: {', '.join('#' + t for t in tags)}"
+
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text=confirmation)
+            logger.info(f"Note {note_id} updated by user {user_id} via modal")
 
         except Exception as e:
-            logger.error(f"Error handling /edit_note command: {e}")
-            respond("❌ An error occurred while editing your note. Please try again.")
+            logger.error(f"Error handling edit_note_modal submission: {e}")
+            ack(
+                response_action="errors",
+                errors={"note_text_block": "An unexpected error occurred. Please try again."},
+            )
 
     @app.command("/delete_note")
     @require_allowed_user(command_name="delete_note")

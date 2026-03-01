@@ -575,3 +575,43 @@ class TestCheckHealth:
         healthy, message = health.check_health()
         assert healthy is False
         assert "boom" in message
+
+
+# ── build_edit_note_modal ────────────────────────────────────────────────────
+
+
+class TestBuildEditNoteModal:
+    def test_modal_structure(self):
+        modal = blocks.build_edit_note_modal(42, "Hello world", "C123")
+        assert modal["type"] == "modal"
+        assert modal["callback_id"] == "edit_note_modal"
+        assert modal["title"]["text"] == "Edit Note #42"
+        assert modal["submit"]["text"] == "Save"
+        assert modal["close"]["text"] == "Cancel"
+
+    def test_private_metadata_contains_note_id_and_channel(self):
+        modal = blocks.build_edit_note_modal(7, "some text", "C456")
+        meta = json.loads(modal["private_metadata"])
+        assert meta["note_id"] == 7
+        assert meta["channel_id"] == "C456"
+
+    def test_input_block_prefilled(self):
+        modal = blocks.build_edit_note_modal(1, "pre-filled text", "")
+        input_block = modal["blocks"][0]
+        assert input_block["type"] == "input"
+        assert input_block["block_id"] == "note_text_block"
+        element = input_block["element"]
+        assert element["type"] == "plain_text_input"
+        assert element["action_id"] == "note_text"
+        assert element["multiline"] is True
+        assert element["initial_value"] == "pre-filled text"
+
+    def test_max_length_set(self):
+        modal = blocks.build_edit_note_modal(1, "text", "")
+        element = modal["blocks"][0]["element"]
+        assert element["max_length"] == config.MAX_NOTE_LENGTH
+
+    def test_channel_defaults_to_empty_string(self):
+        modal = blocks.build_edit_note_modal(5, "text")
+        meta = json.loads(modal["private_metadata"])
+        assert meta["channel_id"] == ""
