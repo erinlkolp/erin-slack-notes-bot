@@ -1,0 +1,68 @@
+import json
+
+
+def build_notes_blocks(notes, page, per_page, total_count):
+    """Build Slack Block Kit blocks for a page of notes with prev/next navigation."""
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Your Notes"},
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"Page {page} of {total_pages}  |  "
+                        f"{total_count} notes total  |  {per_page} per page"
+                    ),
+                }
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    for note_id, note_text, created_at, channel_name in notes:
+        display_text = note_text if len(note_text) <= 200 else note_text[:197] + "..."
+        channel_info = f"  #{channel_name}" if channel_name else ""
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*#{note_id}* — {created_at.strftime('%m/%d/%Y %H:%M')}"
+                        f"{channel_info}\n{display_text}"
+                    ),
+                },
+            }
+        )
+        blocks.append({"type": "divider"})
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "< Previous"},
+                "action_id": "notes_prev_page",
+                "value": json.dumps({"page": page - 1, "per_page": per_page}),
+            }
+        )
+    if page < total_pages:
+        nav_buttons.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Next >"},
+                "action_id": "notes_next_page",
+                "value": json.dumps({"page": page + 1, "per_page": per_page}),
+            }
+        )
+
+    if nav_buttons:
+        blocks.append({"type": "actions", "elements": nav_buttons})
+
+    return blocks

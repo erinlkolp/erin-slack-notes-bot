@@ -1,380 +1,302 @@
-"""Tests for the Slack notes bot.
+"""Tests for the Slack notes bot modules.
 
-These tests exercise the pure-logic helpers and database functions using mocks
-so they can run without a real MySQL server or Slack workspace.
+Each test class targets a specific module (database, tags, blocks, middleware,
+health) so imports are clean and patches point to the right namespace.
 """
 
 import json
 import time
 from datetime import datetime
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-# app.py performs Slack/DB setup at import time.  We need to patch the
-# environment and heavy side-effects so the module can be imported in a
-# test environment without real credentials.
+# ---------------------------------------------------------------------------
+# Import the modules under test.  None of them perform heavy side effects at
+# import time, so no patching is needed just to import them.
+# ---------------------------------------------------------------------------
 
-_ENV = {
-    "SLACK_BOT_TOKEN": "xoxb-test",
-    "SLACK_SIGNING_SECRET": "test-secret",
-    "SLACK_APP_TOKEN": "xapp-test",
-    "ALLOWED_SLACK_USER_ID": "U_ALLOWED",
-    "MYSQL_HOST": "localhost",
-    "MYSQL_PORT": "3306",
-    "MYSQL_DATABASE": "testdb",
-    "MYSQL_USER": "testuser",
-    "MYSQL_PASSWORD": "testpass",
-    "LOG_LEVEL": "WARNING",
-    "HEALTH_CHECK_PORT": "9999",
-}
+import config
+import database
+import tags
+import blocks
+import middleware
+import health
+
+# Set the allowed user that middleware reads at import time.
+middleware.allowed_user_id = "U_ALLOWED"
 
 
-def _import_app():
-    """Import app.py with all external dependencies stubbed out."""
-    import importlib
-
-    with (
-        patch.dict("os.environ", _ENV, clear=False),
-        patch("slack_bolt.App") as MockApp,
-        patch("slack_bolt.adapter.socket_mode.SocketModeHandler"),
-        patch("mysql.connector.pooling.MySQLConnectionPool") as MockPoolCls,
-    ):
-        mock_app_instance = MagicMock()
-        MockApp.return_value = mock_app_instance
-        mock_app_instance.client.auth_test.return_value = {
-            "user": "testbot",
-            "team": "T_TEST",
-        }
-
-        # Make pool initialization and setup_database succeed
-        mock_pool = MagicMock()
-        MockPoolCls.return_value = mock_pool
-        mock_conn = MagicMock()
-        mock_conn.is_connected.return_value = True
-        mock_pool.get_connection.return_value = mock_conn
-
-        import app as app_module
-
-        importlib.reload(app_module)
-
-    return app_module
-
-
-app_module = _import_app()
-
-
-# ── parse_tags ──────────────────────────────────────────────────────────
+# ── parse_tags ───────────────────────────────────────────────────────────────
 
 
 class TestParseTags:
     def test_single_tag(self):
-        assert app_module.parse_tags("meeting #standup notes") == ["standup"]
+        assert tags.parse_tags("meeting #standup notes") == ["standup"]
 
     def test_multiple_tags(self):
-        assert app_module.parse_tags("#bug fix for #backend and #api") == [
+        assert tags.parse_tags("#bug fix for #backend and #api") == [
             "bug",
             "backend",
             "api",
         ]
 
     def test_duplicate_tags_deduplicated(self):
-        assert app_module.parse_tags("#Bug report #bug") == ["bug"]
+        assert tags.parse_tags("#Bug report #bug") == ["bug"]
 
     def test_no_tags(self):
-        assert app_module.parse_tags("no tags here") == []
+        assert tags.parse_tags("no tags here") == []
 
     def test_tags_lowercased(self):
-        assert app_module.parse_tags("#Meeting #IMPORTANT") == ["meeting", "important"]
+        assert tags.parse_tags("#Meeting #IMPORTANT") == ["meeting", "important"]
 
     def test_tag_with_underscores_and_digits(self):
-        assert app_module.parse_tags("#q4_2025 planning") == ["q4_2025"]
+        assert tags.parse_tags("#q4_2025 planning") == ["q4_2025"]
 
 
-# ── build_notes_blocks ──────────────────────────────────────────────────
+# ── build_notes_blocks ───────────────────────────────────────────────────────
 
 
 class TestBuildNotesBlocks:
     def _make_notes(self, count):
-        """Generate a list of fake note tuples."""
         now = datetime(2025, 6, 15, 10, 30)
         return [(i, f"Note text {i}", now, "general") for i in range(1, count + 1)]
 
     def test_single_page_no_nav_buttons(self):
-        notes = self._make_notes(3)
-        blocks = app_module.build_notes_blocks(notes, page=1, per_page=5, total_count=3)
-        action_blocks = [b for b in blocks if b.get("type") == "actions"]
-        assert action_blocks == []
+        result = blocks.build_notes_blocks(self._make_notes(3), page=1, per_page=5, total_count=3)
+        assert [b for b in result if b.get("type") == "actions"] == []
 
     def test_first_page_has_next_only(self):
-        notes = self._make_notes(5)
-        blocks = app_module.build_notes_blocks(notes, page=1, per_page=5, total_count=12)
-        action_blocks = [b for b in blocks if b.get("type") == "actions"]
+        result = blocks.build_notes_blocks(self._make_notes(5), page=1, per_page=5, total_count=12)
+        action_blocks = [b for b in result if b.get("type") == "actions"]
         assert len(action_blocks) == 1
-        buttons = action_blocks[0]["elements"]
-        assert len(buttons) == 1
-        assert buttons[0]["action_id"] == "notes_next_page"
+        btns = action_blocks[0]["elements"]
+        assert len(btns) == 1
+        assert btns[0]["action_id"] == "notes_next_page"
 
     def test_middle_page_has_both_buttons(self):
-        notes = self._make_notes(5)
-        blocks = app_module.build_notes_blocks(notes, page=2, per_page=5, total_count=15)
-        action_blocks = [b for b in blocks if b.get("type") == "actions"]
-        buttons = action_blocks[0]["elements"]
-        action_ids = [b["action_id"] for b in buttons]
-        assert "notes_prev_page" in action_ids
-        assert "notes_next_page" in action_ids
+        result = blocks.build_notes_blocks(self._make_notes(5), page=2, per_page=5, total_count=15)
+        action_blocks = [b for b in result if b.get("type") == "actions"]
+        ids = [b["action_id"] for b in action_blocks[0]["elements"]]
+        assert "notes_prev_page" in ids
+        assert "notes_next_page" in ids
 
     def test_last_page_has_prev_only(self):
-        notes = self._make_notes(2)
-        blocks = app_module.build_notes_blocks(notes, page=3, per_page=5, total_count=12)
-        action_blocks = [b for b in blocks if b.get("type") == "actions"]
-        buttons = action_blocks[0]["elements"]
-        assert len(buttons) == 1
-        assert buttons[0]["action_id"] == "notes_prev_page"
+        result = blocks.build_notes_blocks(self._make_notes(2), page=3, per_page=5, total_count=12)
+        action_blocks = [b for b in result if b.get("type") == "actions"]
+        btns = action_blocks[0]["elements"]
+        assert len(btns) == 1
+        assert btns[0]["action_id"] == "notes_prev_page"
 
     def test_header_and_context_present(self):
-        notes = self._make_notes(1)
-        blocks = app_module.build_notes_blocks(notes, page=1, per_page=5, total_count=1)
-        assert blocks[0]["type"] == "header"
-        assert blocks[1]["type"] == "context"
-        assert "1 notes total" in blocks[1]["elements"][0]["text"]
+        result = blocks.build_notes_blocks(self._make_notes(1), page=1, per_page=5, total_count=1)
+        assert result[0]["type"] == "header"
+        assert result[1]["type"] == "context"
+        assert "1 notes total" in result[1]["elements"][0]["text"]
 
     def test_long_note_truncated(self):
         now = datetime(2025, 6, 15, 10, 30)
         long_text = "x" * 300
-        notes = [(1, long_text, now, None)]
-        blocks = app_module.build_notes_blocks(notes, page=1, per_page=5, total_count=1)
-        section = [b for b in blocks if b.get("type") == "section"][0]
+        result = blocks.build_notes_blocks([(1, long_text, now, None)], page=1, per_page=5, total_count=1)
+        section = [b for b in result if b.get("type") == "section"][0]
         display = section["text"]["text"]
-        # The display text should be truncated and end with "..."
         assert display.endswith("...")
-        # Truncated display: 197 chars + "..." = 200 chars for the note portion
         assert "x" * 197 in display
 
     def test_page_value_in_button_payload(self):
-        notes = self._make_notes(5)
-        blocks = app_module.build_notes_blocks(notes, page=1, per_page=5, total_count=10)
-        action_blocks = [b for b in blocks if b.get("type") == "actions"]
-        next_btn = action_blocks[0]["elements"][0]
-        payload = json.loads(next_btn["value"])
+        result = blocks.build_notes_blocks(self._make_notes(5), page=1, per_page=5, total_count=10)
+        action_blocks = [b for b in result if b.get("type") == "actions"]
+        payload = json.loads(action_blocks[0]["elements"][0]["value"])
         assert payload == {"page": 2, "per_page": 5}
 
 
-# ── check_rate_limit ───────────────────────────────────────────────────
+# ── check_rate_limit ─────────────────────────────────────────────────────────
 
 
 class TestCheckRateLimit:
     def setup_method(self):
-        app_module._last_command_time.clear()
+        middleware._last_command_time.clear()
 
     def test_first_call_allowed(self):
-        assert app_module.check_rate_limit("U1", "cmd") is False
+        assert middleware.check_rate_limit("U1", "cmd") is False
 
     def test_rapid_second_call_blocked(self):
-        app_module.check_rate_limit("U1", "cmd")
-        assert app_module.check_rate_limit("U1", "cmd") is True
+        middleware.check_rate_limit("U1", "cmd")
+        assert middleware.check_rate_limit("U1", "cmd") is True
 
     def test_different_users_independent(self):
-        app_module.check_rate_limit("U1", "cmd")
-        assert app_module.check_rate_limit("U2", "cmd") is False
+        middleware.check_rate_limit("U1", "cmd")
+        assert middleware.check_rate_limit("U2", "cmd") is False
 
     def test_different_commands_independent(self):
-        app_module.check_rate_limit("U1", "cmd_a")
-        assert app_module.check_rate_limit("U1", "cmd_b") is False
+        middleware.check_rate_limit("U1", "cmd_a")
+        assert middleware.check_rate_limit("U1", "cmd_b") is False
 
     def test_allowed_after_cooldown(self):
-        app_module.check_rate_limit("U1", "cmd")
-        # Simulate time passing beyond the rate limit window
+        middleware.check_rate_limit("U1", "cmd")
         key = "U1:cmd"
-        app_module._last_command_time[key] -= app_module.RATE_LIMIT_SECONDS + 1
-        assert app_module.check_rate_limit("U1", "cmd") is False
+        middleware._last_command_time[key] -= config.RATE_LIMIT_SECONDS + 1
+        assert middleware.check_rate_limit("U1", "cmd") is False
 
 
-# ── require_allowed_user decorator ─────────────────────────────────────
+# ── require_allowed_user decorator ───────────────────────────────────────────
 
 
 class TestRequireAllowedUser:
+    def setup_method(self):
+        middleware.allowed_user_id = "U_ALLOWED"
+        middleware._last_command_time.clear()
+
     def test_authorized_user_proceeds(self):
         inner = MagicMock()
-        decorated = app_module.require_allowed_user()(inner)
-        decorated(
-            ack=MagicMock(),
-            respond=MagicMock(),
-            command={"user_id": "U_ALLOWED"},
-        )
+        decorated = middleware.require_allowed_user()(inner)
+        decorated(ack=MagicMock(), respond=MagicMock(), command={"user_id": "U_ALLOWED"})
         inner.assert_called_once()
 
     def test_unauthorized_user_blocked(self):
         inner = MagicMock()
         respond = MagicMock()
-        decorated = app_module.require_allowed_user()(inner)
-        decorated(
-            ack=MagicMock(),
-            respond=respond,
-            command={"user_id": "U_OTHER"},
-        )
+        decorated = middleware.require_allowed_user()(inner)
+        decorated(ack=MagicMock(), respond=respond, command={"user_id": "U_OTHER"})
         inner.assert_not_called()
         respond.assert_called_once()
         assert "restricted" in respond.call_args[0][0]
 
     def test_rate_limited_user_blocked(self):
-        app_module._last_command_time.clear()
         inner = MagicMock()
         respond = MagicMock()
-        decorated = app_module.require_allowed_user(command_name="test_cmd")(inner)
+        decorated = middleware.require_allowed_user(command_name="test_cmd")(inner)
 
-        # First call succeeds
-        decorated(
-            ack=MagicMock(),
-            respond=MagicMock(),
-            command={"user_id": "U_ALLOWED"},
-        )
+        decorated(ack=MagicMock(), respond=MagicMock(), command={"user_id": "U_ALLOWED"})
         assert inner.call_count == 1
 
-        # Immediate second call is rate-limited
-        decorated(
-            ack=MagicMock(),
-            respond=respond,
-            command={"user_id": "U_ALLOWED"},
-        )
-        assert inner.call_count == 1  # not called again
+        decorated(ack=MagicMock(), respond=respond, command={"user_id": "U_ALLOWED"})
+        assert inner.call_count == 1
         respond.assert_called_once()
         assert "wait" in respond.call_args[0][0].lower()
 
     def test_ack_always_called(self):
         ack = MagicMock()
-        decorated = app_module.require_allowed_user()(MagicMock())
-        decorated(ack=ack, respond=MagicMock(), command={"user_id": "U_OTHER"})
+        middleware.require_allowed_user()(MagicMock())(
+            ack=ack, respond=MagicMock(), command={"user_id": "U_OTHER"}
+        )
         ack.assert_called_once()
 
     def test_body_fallback_for_actions(self):
         inner = MagicMock()
-        decorated = app_module.require_allowed_user()(inner)
-        decorated(
-            ack=MagicMock(),
-            respond=MagicMock(),
-            body={"user": {"id": "U_ALLOWED"}},
-        )
+        decorated = middleware.require_allowed_user()(inner)
+        decorated(ack=MagicMock(), respond=MagicMock(), body={"user": {"id": "U_ALLOWED"}})
         inner.assert_called_once()
 
 
-# ── init_db_pool ───────────────────────────────────────────────────────
+# ── init_db_pool ─────────────────────────────────────────────────────────────
 
 
 class TestInitDbPool:
     def setup_method(self):
-        self._orig_pool = app_module._db_pool
+        self._orig_pool = database._db_pool
 
     def teardown_method(self):
-        app_module._db_pool = self._orig_pool
+        database._db_pool = self._orig_pool
 
-    @patch("app.time.sleep")
-    @patch("app.MySQLConnectionPool")
+    @patch("database.time.sleep")
+    @patch("database.MySQLConnectionPool")
     def test_creates_pool_on_first_try(self, mock_pool_cls, mock_sleep):
         mock_pool = MagicMock()
         mock_pool_cls.return_value = mock_pool
 
-        result = app_module.init_db_pool()
-        assert result is True
-        assert app_module._db_pool is mock_pool
+        assert database.init_db_pool() is True
+        assert database._db_pool is mock_pool
         mock_sleep.assert_not_called()
 
-    @patch("app.time.sleep")
-    @patch("app.MySQLConnectionPool")
+    @patch("database.time.sleep")
+    @patch("database.MySQLConnectionPool")
     def test_retries_then_succeeds(self, mock_pool_cls, mock_sleep):
         from mysql.connector import Error
 
         mock_pool = MagicMock()
         mock_pool_cls.side_effect = [Error("fail"), mock_pool]
 
-        result = app_module.init_db_pool()
-        assert result is True
-        assert app_module._db_pool is mock_pool
+        assert database.init_db_pool() is True
+        assert database._db_pool is mock_pool
         mock_sleep.assert_called_once_with(1)
 
-    @patch("app.time.sleep")
-    @patch("app.MySQLConnectionPool")
+    @patch("database.time.sleep")
+    @patch("database.MySQLConnectionPool")
     def test_returns_false_after_all_retries(self, mock_pool_cls, mock_sleep):
         from mysql.connector import Error
 
         mock_pool_cls.side_effect = Error("down")
-
-        result = app_module.init_db_pool()
-        assert result is False
+        assert database.init_db_pool() is False
 
 
-# ── get_db_connection (pool-based retry behaviour) ─────────────────────
+# ── get_db_connection ─────────────────────────────────────────────────────────
 
 
 class TestGetDbConnectionRetry:
     def setup_method(self):
-        self._orig_pool = app_module._db_pool
+        self._orig_pool = database._db_pool
 
     def teardown_method(self):
-        app_module._db_pool = self._orig_pool
+        database._db_pool = self._orig_pool
 
-    @patch("app.time.sleep")
+    @patch("database.time.sleep")
     def test_succeeds_on_first_try(self, mock_sleep):
         mock_pool = MagicMock()
         mock_conn = MagicMock()
         mock_pool.get_connection.return_value = mock_conn
-        app_module._db_pool = mock_pool
+        database._db_pool = mock_pool
 
-        result = app_module.get_db_connection()
-        assert result is mock_conn
+        assert database.get_db_connection() is mock_conn
         mock_sleep.assert_not_called()
 
-    @patch("app.time.sleep")
+    @patch("database.time.sleep")
     def test_retries_then_succeeds(self, mock_sleep):
         from mysql.connector import Error
 
         mock_pool = MagicMock()
         mock_conn = MagicMock()
         mock_pool.get_connection.side_effect = [Error("fail"), mock_conn]
-        app_module._db_pool = mock_pool
+        database._db_pool = mock_pool
 
-        result = app_module.get_db_connection()
-        assert result is mock_conn
-        mock_sleep.assert_called_once_with(1)  # base delay * 2^0
+        assert database.get_db_connection() is mock_conn
+        mock_sleep.assert_called_once_with(1)
 
-    @patch("app.time.sleep")
+    @patch("database.time.sleep")
     def test_all_retries_fail_returns_none(self, mock_sleep):
         from mysql.connector import Error
 
         mock_pool = MagicMock()
         mock_pool.get_connection.side_effect = Error("persistent failure")
-        app_module._db_pool = mock_pool
+        database._db_pool = mock_pool
 
-        result = app_module.get_db_connection()
-        assert result is None
-        assert mock_sleep.call_count == app_module.DB_CONNECT_MAX_RETRIES - 1
+        assert database.get_db_connection() is None
+        assert mock_sleep.call_count == config.DB_CONNECT_MAX_RETRIES - 1
 
-    @patch("app.time.sleep")
+    @patch("database.time.sleep")
     def test_exponential_backoff_delays(self, mock_sleep):
         from mysql.connector import Error
 
         mock_pool = MagicMock()
         mock_pool.get_connection.side_effect = Error("down")
-        app_module._db_pool = mock_pool
+        database._db_pool = mock_pool
 
-        app_module.get_db_connection()
+        database.get_db_connection()
         delays = [c[0][0] for c in mock_sleep.call_args_list]
-        # With base=1 and max_retries=3: delays should be [1, 2]
         assert delays == [1, 2]
 
-    @patch("app.time.sleep")
+    @patch("database.time.sleep")
     def test_returns_none_when_pool_not_initialized(self, mock_sleep):
-        app_module._db_pool = None
-        result = app_module.get_db_connection()
-        assert result is None
+        database._db_pool = None
+        assert database.get_db_connection() is None
         mock_sleep.assert_not_called()
 
 
-# ── save_note (with mocked DB) ────────────────────────────────────────
+# ── save_note ─────────────────────────────────────────────────────────────────
 
 
 class TestSaveNote:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_note_id_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -383,18 +305,16 @@ class TestSaveNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.save_note("U1", "alice", "hello world")
-        assert result == 42
+        assert database.save_note("U1", "alice", "hello world") == 42
         mock_cursor.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_when_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        result = app_module.save_note("U1", "alice", "hello")
-        assert result is False
+        assert database.save_note("U1", "alice", "hello") is False
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_on_db_error(self, mock_get_conn):
         from mysql.connector import Error
 
@@ -405,15 +325,14 @@ class TestSaveNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.save_note("U1", "alice", "hello")
-        assert result is False
+        assert database.save_note("U1", "alice", "hello") is False
 
 
-# ── get_notes_page (with mocked DB) ───────────────────────────────────
+# ── get_notes_page ────────────────────────────────────────────────────────────
 
 
 class TestGetNotesPage:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_notes_and_count(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -427,23 +346,23 @@ class TestGetNotesPage:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        notes, total = app_module.get_notes_page("U1", page=1, per_page=5)
+        notes, total = database.get_notes_page("U1", page=1, per_page=5)
         assert total == 3
         assert len(notes) == 2
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        notes, total = app_module.get_notes_page("U1", page=1, per_page=5)
+        notes, total = database.get_notes_page("U1", page=1, per_page=5)
         assert notes is None
         assert total == 0
 
 
-# ── save_tags (with mocked DB) ────────────────────────────────────────
+# ── save_tags ─────────────────────────────────────────────────────────────────
 
 
 class TestSaveTags:
-    @patch("app.get_db_connection")
+    @patch("tags.get_db_connection")
     def test_inserts_tags(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -451,23 +370,22 @@ class TestSaveTags:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        app_module.save_tags(42, ["bug", "backend"])
+        tags.save_tags(42, ["bug", "backend"])
         mock_cursor.executemany.assert_called_once()
-        args = mock_cursor.executemany.call_args[0]
-        assert args[1] == [(42, "bug"), (42, "backend")]
+        assert mock_cursor.executemany.call_args[0][1] == [(42, "bug"), (42, "backend")]
         mock_conn.commit.assert_called_once()
 
-    @patch("app.get_db_connection")
+    @patch("tags.get_db_connection")
     def test_noop_for_empty_tags(self, mock_get_conn):
-        app_module.save_tags(42, [])
+        tags.save_tags(42, [])
         mock_get_conn.assert_not_called()
 
 
-# ── get_note_by_id (with mocked DB) ───────────────────────────────────
+# ── get_note_by_id ────────────────────────────────────────────────────────────
 
 
 class TestGetNoteById:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_note_when_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -477,10 +395,9 @@ class TestGetNoteById:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.get_note_by_id(1, "U1")
-        assert result == (1, "hello", now, "general")
+        assert database.get_note_by_id(1, "U1") == (1, "hello", now, "general")
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_none_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -489,21 +406,19 @@ class TestGetNoteById:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.get_note_by_id(999, "U1")
-        assert result is None
+        assert database.get_note_by_id(999, "U1") is None
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        result = app_module.get_note_by_id(1, "U1")
-        assert result is None
+        assert database.get_note_by_id(1, "U1") is None
 
 
-# ── update_note (with mocked DB) ──────────────────────────────────────
+# ── update_note ───────────────────────────────────────────────────────────────
 
 
 class TestUpdateNote:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -512,11 +427,10 @@ class TestUpdateNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.update_note(1, "U1", "updated text")
-        assert result is True
+        assert database.update_note(1, "U1", "updated text") is True
         mock_conn.commit.assert_called_once()
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -525,21 +439,19 @@ class TestUpdateNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.update_note(999, "U1", "updated text")
-        assert result is False
+        assert database.update_note(999, "U1", "updated text") is False
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        result = app_module.update_note(1, "U1", "updated")
-        assert result is False
+        assert database.update_note(1, "U1", "updated") is False
 
 
-# ── delete_note (with mocked DB) ──────────────────────────────────────
+# ── delete_note ───────────────────────────────────────────────────────────────
 
 
 class TestDeleteNote:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -548,11 +460,10 @@ class TestDeleteNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.delete_note(1, "U1")
-        assert result is True
+        assert database.delete_note(1, "U1") is True
         mock_conn.commit.assert_called_once()
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -561,21 +472,19 @@ class TestDeleteNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.delete_note(999, "U1")
-        assert result is False
+        assert database.delete_note(999, "U1") is False
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        result = app_module.delete_note(1, "U1")
-        assert result is False
+        assert database.delete_note(1, "U1") is False
 
 
-# ── delete_tags_for_note (with mocked DB) ──────────────────────────────
+# ── delete_tags_for_note ──────────────────────────────────────────────────────
 
 
 class TestDeleteTagsForNote:
-    @patch("app.get_db_connection")
+    @patch("tags.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -583,23 +492,21 @@ class TestDeleteTagsForNote:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        result = app_module.delete_tags_for_note(42)
-        assert result is True
+        assert tags.delete_tags_for_note(42) is True
         mock_cursor.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
 
-    @patch("app.get_db_connection")
+    @patch("tags.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        result = app_module.delete_tags_for_note(42)
-        assert result is False
+        assert tags.delete_tags_for_note(42) is False
 
 
-# ── search_notes (with mocked DB) ─────────────────────────────────────
+# ── search_notes ──────────────────────────────────────────────────────────────
 
 
 class TestSearchNotes:
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_matching_notes(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -613,18 +520,18 @@ class TestSearchNotes:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        notes, total = app_module.search_notes("U1", "meeting", page=1, per_page=5)
+        notes, total = database.search_notes("U1", "meeting", page=1, per_page=5)
         assert total == 2
         assert len(notes) == 2
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
-        notes, total = app_module.search_notes("U1", "keyword", page=1, per_page=5)
+        notes, total = database.search_notes("U1", "keyword", page=1, per_page=5)
         assert notes is None
         assert total == 0
 
-    @patch("app.get_db_connection")
+    @patch("database.get_db_connection")
     def test_uses_like_pattern(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -634,38 +541,37 @@ class TestSearchNotes:
         mock_conn.cursor.return_value = mock_cursor
         mock_get_conn.return_value = mock_conn
 
-        app_module.search_notes("U1", "test", page=1, per_page=5)
-        # The LIKE pattern should wrap the keyword with %
+        database.search_notes("U1", "test", page=1, per_page=5)
         count_call = mock_cursor.execute.call_args_list[0]
         assert count_call[0][1] == ("U1", "%test%")
 
 
-# ── check_health ───────────────────────────────────────────────────────
+# ── check_health ──────────────────────────────────────────────────────────────
 
 
 class TestCheckHealth:
-    @patch("app.get_db_connection")
+    @patch("health.get_db_connection")
     def test_healthy_when_db_connected(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
         mock_get_conn.return_value = mock_conn
 
-        healthy, message = app_module.check_health()
+        healthy, message = health.check_health()
         assert healthy is True
         assert message == "ok"
 
-    @patch("app.get_db_connection")
+    @patch("health.get_db_connection")
     def test_unhealthy_when_db_unavailable(self, mock_get_conn):
         mock_get_conn.return_value = None
 
-        healthy, message = app_module.check_health()
+        healthy, message = health.check_health()
         assert healthy is False
         assert "database" in message
 
-    @patch("app.get_db_connection")
+    @patch("health.get_db_connection")
     def test_unhealthy_on_exception(self, mock_get_conn):
         mock_get_conn.side_effect = RuntimeError("boom")
 
-        healthy, message = app_module.check_health()
+        healthy, message = health.check_health()
         assert healthy is False
         assert "boom" in message
