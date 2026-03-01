@@ -26,6 +26,7 @@ _ENV = {
     "MYSQL_USER": "testuser",
     "MYSQL_PASSWORD": "testpass",
     "LOG_LEVEL": "WARNING",
+    "HEALTH_CHECK_PORT": "9999",
 }
 
 
@@ -37,7 +38,7 @@ def _import_app():
         patch.dict("os.environ", _ENV, clear=False),
         patch("slack_bolt.App") as MockApp,
         patch("slack_bolt.adapter.socket_mode.SocketModeHandler"),
-        patch("mysql.connector.connect") as mock_connect,
+        patch("mysql.connector.pooling.MySQLConnectionPool") as MockPoolCls,
     ):
         mock_app_instance = MagicMock()
         MockApp.return_value = mock_app_instance
@@ -46,10 +47,12 @@ def _import_app():
             "team": "T_TEST",
         }
 
-        # Make setup_database succeed via a mock connection
+        # Make pool initialization and setup_database succeed
+        mock_pool = MagicMock()
+        MockPoolCls.return_value = mock_pool
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
-        mock_connect.return_value = mock_conn
+        mock_pool.get_connection.return_value = mock_conn
 
         import app as app_module
 
@@ -255,50 +258,116 @@ class TestRequireAllowedUser:
         inner.assert_called_once()
 
 
-# ── get_db_connection (retry behaviour) ────────────────────────────────
+# ── init_db_pool ───────────────────────────────────────────────────────
+
+
+class TestInitDbPool:
+    def setup_method(self):
+        self._orig_pool = app_module._db_pool
+
+    def teardown_method(self):
+        app_module._db_pool = self._orig_pool
+
+    @patch("app.time.sleep")
+    @patch("app.MySQLConnectionPool")
+    def test_creates_pool_on_first_try(self, mock_pool_cls, mock_sleep):
+        mock_pool = MagicMock()
+        mock_pool_cls.return_value = mock_pool
+
+        result = app_module.init_db_pool()
+        assert result is True
+        assert app_module._db_pool is mock_pool
+        mock_sleep.assert_not_called()
+
+    @patch("app.time.sleep")
+    @patch("app.MySQLConnectionPool")
+    def test_retries_then_succeeds(self, mock_pool_cls, mock_sleep):
+        from mysql.connector import Error
+
+        mock_pool = MagicMock()
+        mock_pool_cls.side_effect = [Error("fail"), mock_pool]
+
+        result = app_module.init_db_pool()
+        assert result is True
+        assert app_module._db_pool is mock_pool
+        mock_sleep.assert_called_once_with(1)
+
+    @patch("app.time.sleep")
+    @patch("app.MySQLConnectionPool")
+    def test_returns_false_after_all_retries(self, mock_pool_cls, mock_sleep):
+        from mysql.connector import Error
+
+        mock_pool_cls.side_effect = Error("down")
+
+        result = app_module.init_db_pool()
+        assert result is False
+
+
+# ── get_db_connection (pool-based retry behaviour) ─────────────────────
 
 
 class TestGetDbConnectionRetry:
+    def setup_method(self):
+        self._orig_pool = app_module._db_pool
+
+    def teardown_method(self):
+        app_module._db_pool = self._orig_pool
+
     @patch("app.time.sleep")
-    @patch("app.mysql.connector.connect")
-    def test_succeeds_on_first_try(self, mock_connect, mock_sleep):
+    def test_succeeds_on_first_try(self, mock_sleep):
+        mock_pool = MagicMock()
         mock_conn = MagicMock()
-        mock_connect.return_value = mock_conn
+        mock_pool.get_connection.return_value = mock_conn
+        app_module._db_pool = mock_pool
+
         result = app_module.get_db_connection()
         assert result is mock_conn
         mock_sleep.assert_not_called()
 
     @patch("app.time.sleep")
-    @patch("app.mysql.connector.connect")
-    def test_retries_then_succeeds(self, mock_connect, mock_sleep):
+    def test_retries_then_succeeds(self, mock_sleep):
         from mysql.connector import Error
 
+        mock_pool = MagicMock()
         mock_conn = MagicMock()
-        mock_connect.side_effect = [Error("fail"), mock_conn]
+        mock_pool.get_connection.side_effect = [Error("fail"), mock_conn]
+        app_module._db_pool = mock_pool
+
         result = app_module.get_db_connection()
         assert result is mock_conn
         mock_sleep.assert_called_once_with(1)  # base delay * 2^0
 
     @patch("app.time.sleep")
-    @patch("app.mysql.connector.connect")
-    def test_all_retries_fail_returns_none(self, mock_connect, mock_sleep):
+    def test_all_retries_fail_returns_none(self, mock_sleep):
         from mysql.connector import Error
 
-        mock_connect.side_effect = Error("persistent failure")
+        mock_pool = MagicMock()
+        mock_pool.get_connection.side_effect = Error("persistent failure")
+        app_module._db_pool = mock_pool
+
         result = app_module.get_db_connection()
         assert result is None
         assert mock_sleep.call_count == app_module.DB_CONNECT_MAX_RETRIES - 1
 
     @patch("app.time.sleep")
-    @patch("app.mysql.connector.connect")
-    def test_exponential_backoff_delays(self, mock_connect, mock_sleep):
+    def test_exponential_backoff_delays(self, mock_sleep):
         from mysql.connector import Error
 
-        mock_connect.side_effect = Error("down")
+        mock_pool = MagicMock()
+        mock_pool.get_connection.side_effect = Error("down")
+        app_module._db_pool = mock_pool
+
         app_module.get_db_connection()
         delays = [c[0][0] for c in mock_sleep.call_args_list]
         # With base=1 and max_retries=3: delays should be [1, 2]
         assert delays == [1, 2]
+
+    @patch("app.time.sleep")
+    def test_returns_none_when_pool_not_initialized(self, mock_sleep):
+        app_module._db_pool = None
+        result = app_module.get_db_connection()
+        assert result is None
+        mock_sleep.assert_not_called()
 
 
 # ── save_note (with mocked DB) ────────────────────────────────────────
@@ -392,3 +461,211 @@ class TestSaveTags:
     def test_noop_for_empty_tags(self, mock_get_conn):
         app_module.save_tags(42, [])
         mock_get_conn.assert_not_called()
+
+
+# ── get_note_by_id (with mocked DB) ───────────────────────────────────
+
+
+class TestGetNoteById:
+    @patch("app.get_db_connection")
+    def test_returns_note_when_found(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        now = datetime.now()
+        mock_cursor.fetchone.return_value = (1, "hello", now, "general")
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.get_note_by_id(1, "U1")
+        assert result == (1, "hello", now, "general")
+
+    @patch("app.get_db_connection")
+    def test_returns_none_when_not_found(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.get_note_by_id(999, "U1")
+        assert result is None
+
+    @patch("app.get_db_connection")
+    def test_returns_none_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        result = app_module.get_note_by_id(1, "U1")
+        assert result is None
+
+
+# ── update_note (with mocked DB) ──────────────────────────────────────
+
+
+class TestUpdateNote:
+    @patch("app.get_db_connection")
+    def test_returns_true_on_success(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 1
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.update_note(1, "U1", "updated text")
+        assert result is True
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_returns_false_when_not_found(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.update_note(999, "U1", "updated text")
+        assert result is False
+
+    @patch("app.get_db_connection")
+    def test_returns_false_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        result = app_module.update_note(1, "U1", "updated")
+        assert result is False
+
+
+# ── delete_note (with mocked DB) ──────────────────────────────────────
+
+
+class TestDeleteNote:
+    @patch("app.get_db_connection")
+    def test_returns_true_on_success(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 1
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.delete_note(1, "U1")
+        assert result is True
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_returns_false_when_not_found(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.delete_note(999, "U1")
+        assert result is False
+
+    @patch("app.get_db_connection")
+    def test_returns_false_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        result = app_module.delete_note(1, "U1")
+        assert result is False
+
+
+# ── delete_tags_for_note (with mocked DB) ──────────────────────────────
+
+
+class TestDeleteTagsForNote:
+    @patch("app.get_db_connection")
+    def test_returns_true_on_success(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        result = app_module.delete_tags_for_note(42)
+        assert result is True
+        mock_cursor.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_returns_false_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        result = app_module.delete_tags_for_note(42)
+        assert result is False
+
+
+# ── search_notes (with mocked DB) ─────────────────────────────────────
+
+
+class TestSearchNotes:
+    @patch("app.get_db_connection")
+    def test_returns_matching_notes(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        now = datetime.now()
+        mock_cursor.fetchone.return_value = (2,)
+        mock_cursor.fetchall.return_value = [
+            (1, "meeting notes", now, "general"),
+            (3, "meeting agenda", now, "work"),
+        ]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        notes, total = app_module.search_notes("U1", "meeting", page=1, per_page=5)
+        assert total == 2
+        assert len(notes) == 2
+
+    @patch("app.get_db_connection")
+    def test_returns_none_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        notes, total = app_module.search_notes("U1", "keyword", page=1, per_page=5)
+        assert notes is None
+        assert total == 0
+
+    @patch("app.get_db_connection")
+    def test_uses_like_pattern(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (0,)
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        app_module.search_notes("U1", "test", page=1, per_page=5)
+        # The LIKE pattern should wrap the keyword with %
+        count_call = mock_cursor.execute.call_args_list[0]
+        assert count_call[0][1] == ("U1", "%test%")
+
+
+# ── check_health ───────────────────────────────────────────────────────
+
+
+class TestCheckHealth:
+    @patch("app.get_db_connection")
+    def test_healthy_when_db_connected(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_get_conn.return_value = mock_conn
+
+        healthy, message = app_module.check_health()
+        assert healthy is True
+        assert message == "ok"
+
+    @patch("app.get_db_connection")
+    def test_unhealthy_when_db_unavailable(self, mock_get_conn):
+        mock_get_conn.return_value = None
+
+        healthy, message = app_module.check_health()
+        assert healthy is False
+        assert "database" in message
+
+    @patch("app.get_db_connection")
+    def test_unhealthy_on_exception(self, mock_get_conn):
+        mock_get_conn.side_effect = RuntimeError("boom")
+
+        healthy, message = app_module.check_health()
+        assert healthy is False
+        assert "boom" in message

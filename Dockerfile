@@ -10,6 +10,8 @@ COPY . .
 RUN useradd -m appuser
 USER appuser
 
+EXPOSE 8080
+
 STOPSIGNAL SIGTERM
 
 CMD ["python", "app.py"]

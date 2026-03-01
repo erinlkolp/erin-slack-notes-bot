@@ -6,8 +6,11 @@ import signal
 import sys
 import time
 import functools
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import mysql.connector
 from mysql.connector import Error
+from mysql.connector.pooling import MySQLConnectionPool
 from collections import defaultdict
 from datetime import datetime
 from slack_bolt import App
@@ -24,7 +27,10 @@ RATE_LIMIT_SECONDS = 5
 RATE_LIMIT_MAX_ENTRIES = 1000
 DB_CONNECT_MAX_RETRIES = 3
 DB_CONNECT_BASE_DELAY = 1  # seconds, doubles each retry
+DB_POOL_SIZE = 5
+HEALTH_CHECK_PORT = int(os.environ.get("HEALTH_CHECK_PORT", "8080"))
 _last_command_time = defaultdict(float)
+_db_pool = None
 
 TAG_PATTERN = re.compile(r"#(\w+)")
 
@@ -88,45 +94,87 @@ except Exception as e:
     logger.error("Check your SLACK_BOT_TOKEN - it should start with 'xoxb-'")
     exit(1)
 
-# Database connection and setup
-def get_db_connection():
-    """Create and return a MySQL database connection with retry and exponential backoff.
+
+# ---------------------------------------------------------------------------
+# Database connection pool
+# ---------------------------------------------------------------------------
+
+def init_db_pool():
+    """Create the MySQL connection pool with retry and exponential backoff.
 
     Retries up to DB_CONNECT_MAX_RETRIES times with exponential backoff
-    (1s, 2s, 4s …) so the bot can recover from transient database outages
-    without requiring a restart.
+    (1s, 2s, 4s ...) so the bot can recover from transient database outages
+    at startup.
     """
+    global _db_pool
     ssl_ca = os.environ.get("MYSQL_SSL_CA")
-    connect_args = {
+    pool_args = {
+        "pool_name": "slackbot_pool",
+        "pool_size": DB_POOL_SIZE,
+        "pool_reset_session": True,
         "host": mysql_host,
-        "port": mysql_port,
+        "port": int(mysql_port),
         "database": mysql_database,
         "user": mysql_user,
         "password": mysql_password,
     }
     if ssl_ca:
-        connect_args["ssl_ca"] = ssl_ca
-        connect_args["ssl_verify_cert"] = True
+        pool_args["ssl_ca"] = ssl_ca
+        pool_args["ssl_verify_cert"] = True
 
     last_error = None
     for attempt in range(DB_CONNECT_MAX_RETRIES):
         try:
-            connection = mysql.connector.connect(**connect_args)
+            _db_pool = MySQLConnectionPool(**pool_args)
             if attempt > 0:
-                logger.info(f"Database connection succeeded on attempt {attempt + 1}")
+                logger.info(f"Connection pool created on attempt {attempt + 1}")
+            logger.info(f"Database connection pool created (size={DB_POOL_SIZE})")
+            return True
+        except Error as e:
+            last_error = e
+            if attempt < DB_CONNECT_MAX_RETRIES - 1:
+                delay = DB_CONNECT_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"Pool creation attempt {attempt + 1}/{DB_CONNECT_MAX_RETRIES} "
+                    f"failed: {e}. Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+
+    logger.error(f"Failed to create connection pool after {DB_CONNECT_MAX_RETRIES} attempts: {last_error}")
+    return False
+
+
+def get_db_connection():
+    """Get a connection from the pool with retry and exponential backoff.
+
+    Returns a pooled connection on success, or None after all retries
+    are exhausted.  Callers must close the connection in a finally block
+    so it is returned to the pool.
+    """
+    if _db_pool is None:
+        logger.error("Database connection pool not initialized")
+        return None
+
+    last_error = None
+    for attempt in range(DB_CONNECT_MAX_RETRIES):
+        try:
+            connection = _db_pool.get_connection()
+            if attempt > 0:
+                logger.info(f"Got pooled connection on attempt {attempt + 1}")
             return connection
         except Error as e:
             last_error = e
             if attempt < DB_CONNECT_MAX_RETRIES - 1:
                 delay = DB_CONNECT_BASE_DELAY * (2 ** attempt)
                 logger.warning(
-                    f"MySQL connection attempt {attempt + 1}/{DB_CONNECT_MAX_RETRIES} "
+                    f"Get connection attempt {attempt + 1}/{DB_CONNECT_MAX_RETRIES} "
                     f"failed: {e}. Retrying in {delay}s..."
                 )
                 time.sleep(delay)
 
-    logger.error(f"MySQL connection failed after {DB_CONNECT_MAX_RETRIES} attempts: {last_error}")
+    logger.error(f"Failed to get connection from pool after {DB_CONNECT_MAX_RETRIES} attempts: {last_error}")
     return None
+
 
 def setup_database():
     """Create the notes table if it doesn't exist"""
@@ -280,6 +328,28 @@ def save_tags(note_id, tags):
             connection.close()
 
 
+def delete_tags_for_note(note_id):
+    """Delete all tags for a note (used before re-tagging on edit)."""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return False
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM note_tags WHERE note_id = %s", (note_id,))
+        connection.commit()
+        return True
+    except Error as e:
+        logger.error(f"Error deleting tags: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
 def get_notes_by_tag(user_id, tag, page, per_page):
     """Fetch a page of notes that have a given tag. Returns (notes_list, total_count)."""
     connection = None
@@ -344,6 +414,10 @@ def get_user_tags(user_id):
             connection.close()
 
 
+# ---------------------------------------------------------------------------
+# Note CRUD
+# ---------------------------------------------------------------------------
+
 def save_note(user_id, username, note_text, channel_id=None, channel_name=None):
     """Save a note to the database"""
     connection = None
@@ -376,6 +450,85 @@ def save_note(user_id, username, note_text, channel_id=None, channel_name=None):
         if connection and connection.is_connected():
             connection.close()
 
+
+def get_note_by_id(note_id, user_id):
+    """Fetch a single note by ID, only if it belongs to the given user."""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return None
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT id, note_text, created_at, channel_name "
+            "FROM notes WHERE id = %s AND user_id = %s",
+            (note_id, user_id),
+        )
+        return cursor.fetchone()
+    except Error as e:
+        logger.error(f"Database error in get_note_by_id: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def update_note(note_id, user_id, new_text):
+    """Update a note's text. Returns True on success, False otherwise."""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return False
+        cursor = connection.cursor()
+        cursor.execute(
+            "UPDATE notes SET note_text = %s WHERE id = %s AND user_id = %s",
+            (new_text, note_id, user_id),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+    except Error as e:
+        logger.error(f"Error updating note: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def delete_note(note_id, user_id):
+    """Delete a note. Returns True on success, False otherwise.
+
+    Tags are auto-deleted via ON DELETE CASCADE.
+    """
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return False
+        cursor = connection.cursor()
+        cursor.execute(
+            "DELETE FROM notes WHERE id = %s AND user_id = %s",
+            (note_id, user_id),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+    except Error as e:
+        logger.error(f"Error deleting note: {e}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
 def get_notes_page(user_id, page, per_page):
     """Fetch a single page of notes for a user. Returns (notes_list, total_count)."""
     connection = None
@@ -404,6 +557,43 @@ def get_notes_page(user_id, page, per_page):
 
     except Error as e:
         logger.error(f"Database error in get_notes_page: {e}")
+        return None, 0
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def search_notes(user_id, keyword, page, per_page):
+    """Search notes by keyword using LIKE. Returns (notes_list, total_count)."""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return None, 0
+        cursor = connection.cursor()
+
+        like_pattern = f"%{keyword}%"
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM notes WHERE user_id = %s AND note_text LIKE %s",
+            (user_id, like_pattern),
+        )
+        total_count = cursor.fetchone()[0]
+
+        offset = (page - 1) * per_page
+        cursor.execute(
+            "SELECT id, note_text, created_at, channel_name "
+            "FROM notes WHERE user_id = %s AND note_text LIKE %s "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (user_id, like_pattern, per_page, offset),
+        )
+        notes = cursor.fetchall()
+        return notes, total_count
+    except Error as e:
+        logger.error(f"Database error in search_notes: {e}")
         return None, 0
     finally:
         if cursor:
@@ -474,13 +664,77 @@ def build_notes_blocks(notes, page, per_page, total_count):
     return blocks
 
 
-# Test database connection and setup
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+def check_health():
+    """Check database connectivity. Returns (is_healthy, message)."""
+    connection = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return False, "database connection failed"
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler that exposes a /healthz endpoint."""
+
+    def do_GET(self):
+        if self.path == "/healthz":
+            healthy, message = check_health()
+            status = 200 if healthy else 503
+            body = json.dumps({"status": "healthy" if healthy else "unhealthy", "message": message})
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # Suppress default request logging to keep output clean
+        pass
+
+
+def start_health_check_server():
+    """Start the health check HTTP server on a daemon thread."""
+    server = HTTPServer(("0.0.0.0", HEALTH_CHECK_PORT), HealthCheckHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info(f"Health check server started on port {HEALTH_CHECK_PORT}")
+    return server
+
+
+# ---------------------------------------------------------------------------
+# Startup: initialize pool and seed tables
+# ---------------------------------------------------------------------------
+logger.info("Initializing database connection pool...")
+if not init_db_pool():
+    logger.error("Failed to create database connection pool. Check MySQL configuration.")
+    exit(1)
+
 logger.info("Testing database connection...")
 if setup_database():
     logger.info("Database connection successful")
 else:
     logger.error("Database connection failed. Make sure MySQL is running and credentials are correct.")
     exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Slack event & command handlers
+# ---------------------------------------------------------------------------
 
 # Listen for messages (simplified approach)
 @app.message(".*")
@@ -688,6 +942,160 @@ def handle_notes_by_tag(ack, respond, command, logger):
         respond("❌ An error occurred while retrieving your notes.")
 
 
+# Edit a note
+@app.command("/edit_note")
+@require_allowed_user(command_name="edit_note")
+def handle_edit_note(ack, respond, command, logger):
+    """Handle /edit_note command.
+
+    Usage: /edit_note <note_id> <new text>
+    """
+    try:
+        user_id = command.get('user_id')
+        text = command.get('text', '').strip()
+
+        parts = text.split(None, 1)
+        if len(parts) < 2:
+            respond("❌ Usage: `/edit_note <note_id> <new text>`\nExample: `/edit_note 42 Updated note content`")
+            return
+
+        try:
+            note_id = int(parts[0])
+        except ValueError:
+            respond("❌ Invalid note ID. Usage: `/edit_note <note_id> <new text>`")
+            return
+
+        new_text = parts[1]
+
+        if len(new_text) > MAX_NOTE_LENGTH:
+            respond(f"❌ Note is too long ({len(new_text)} characters). Maximum is {MAX_NOTE_LENGTH} characters.")
+            return
+
+        # Check note exists and belongs to user
+        note = get_note_by_id(note_id, user_id)
+        if note is None:
+            respond(f"❌ Note #{note_id} not found or doesn't belong to you.")
+            return
+
+        # Update the note
+        if not update_note(note_id, user_id, new_text):
+            respond("❌ Failed to update note. Please try again.")
+            return
+
+        # Re-parse and update tags
+        delete_tags_for_note(note_id)
+        tags = parse_tags(new_text)
+        if tags:
+            save_tags(note_id, tags)
+
+        response = f"✅ Note #{note_id} updated successfully!\n📄 New text: \"{new_text}\""
+        if tags:
+            response += f"\n🏷️ Tags: {', '.join('#' + t for t in tags)}"
+        respond(response)
+        logger.info(f"Note {note_id} updated by user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error handling /edit_note command: {e}")
+        respond("❌ An error occurred while editing your note. Please try again.")
+
+
+# Delete a note
+@app.command("/delete_note")
+@require_allowed_user(command_name="delete_note")
+def handle_delete_note(ack, respond, command, logger):
+    """Handle /delete_note command.
+
+    Usage: /delete_note <note_id>
+    """
+    try:
+        user_id = command.get('user_id')
+        text = command.get('text', '').strip()
+
+        if not text:
+            respond("❌ Usage: `/delete_note <note_id>`\nExample: `/delete_note 42`")
+            return
+
+        try:
+            note_id = int(text)
+        except ValueError:
+            respond("❌ Invalid note ID. Usage: `/delete_note <note_id>`")
+            return
+
+        # Check note exists and belongs to user
+        note = get_note_by_id(note_id, user_id)
+        if note is None:
+            respond(f"❌ Note #{note_id} not found or doesn't belong to you.")
+            return
+
+        # Delete the note (tags auto-deleted via CASCADE)
+        if not delete_note(note_id, user_id):
+            respond("❌ Failed to delete note. Please try again.")
+            return
+
+        respond(f"✅ Note #{note_id} has been deleted.")
+        logger.info(f"Note {note_id} deleted by user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error handling /delete_note command: {e}")
+        respond("❌ An error occurred while deleting your note. Please try again.")
+
+
+# Search notes by keyword
+@app.command("/search_notes")
+@require_allowed_user(command_name="search_notes")
+def handle_search_notes(ack, respond, command, logger):
+    """Handle /search_notes command.
+
+    Usage: /search_notes <keyword>
+    """
+    try:
+        user_id = command.get('user_id')
+        keyword = command.get('text', '').strip()
+
+        if not keyword:
+            respond("❌ Please provide a search term.\nUsage: `/search_notes <keyword>`")
+            return
+
+        page = 1
+        per_page = NOTES_PER_PAGE
+        notes, total_count = search_notes(user_id, keyword, page, per_page)
+
+        if notes is None:
+            respond("❌ Database connection error.")
+            return
+
+        if not notes:
+            respond(f"No notes found matching *\"{keyword}\"*.")
+            return
+
+        blocks = build_notes_blocks(notes, page, per_page, total_count)
+        blocks[0] = {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Search: {keyword}"},
+        }
+        # Swap action_ids so pagination stays within search context
+        for block in blocks:
+            if block.get("type") == "actions":
+                for element in block["elements"]:
+                    payload = json.loads(element["value"])
+                    payload["keyword"] = keyword
+                    element["value"] = json.dumps(payload)
+                    if element["action_id"] == "notes_prev_page":
+                        element["action_id"] = "search_notes_prev_page"
+                    elif element["action_id"] == "notes_next_page":
+                        element["action_id"] = "search_notes_next_page"
+
+        respond(blocks=blocks)
+
+    except Exception as e:
+        logger.error(f"Error handling /search_notes command: {e}")
+        respond("❌ An error occurred while searching your notes.")
+
+
+# ---------------------------------------------------------------------------
+# Pagination action handlers
+# ---------------------------------------------------------------------------
+
 @app.action("notes_prev_page")
 @app.action("notes_next_page")
 @require_allowed_user()
@@ -755,6 +1163,46 @@ def handle_tag_notes_pagination(ack, body, respond, logger):
         logger.error(f"Error handling tag notes pagination: {e}")
 
 
+@app.action("search_notes_prev_page")
+@app.action("search_notes_next_page")
+@require_allowed_user()
+def handle_search_notes_pagination(ack, body, respond, logger):
+    """Handle Previous / Next button clicks for search result pagination."""
+    try:
+        user_id = body["user"]["id"]
+        action = body["actions"][0]
+        payload = json.loads(action["value"])
+        page = payload["page"]
+        per_page = payload["per_page"]
+        keyword = payload["keyword"]
+
+        notes, total_count = search_notes(user_id, keyword, page, per_page)
+
+        if notes is None:
+            return
+
+        blocks = build_notes_blocks(notes, page, per_page, total_count)
+        blocks[0] = {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Search: {keyword}"},
+        }
+        for block in blocks:
+            if block.get("type") == "actions":
+                for element in block["elements"]:
+                    p = json.loads(element["value"])
+                    p["keyword"] = keyword
+                    element["value"] = json.dumps(p)
+                    if element["action_id"] == "notes_prev_page":
+                        element["action_id"] = "search_notes_prev_page"
+                    elif element["action_id"] == "notes_next_page":
+                        element["action_id"] = "search_notes_next_page"
+
+        respond(blocks=blocks, replace_original=True)
+
+    except Exception as e:
+        logger.error(f"Error handling search notes pagination: {e}")
+
+
 @app.error
 def global_error_handler(error, body, logger):
     logger.error(f"Global error: {error}")
@@ -762,11 +1210,15 @@ def global_error_handler(error, body, logger):
 def main():
     """Main function to start the bot"""
     try:
+        # Start health check server
+        health_server = start_health_check_server()
+
         # Create socket mode handler
         handler = SocketModeHandler(app, app_token)
 
         def shutdown_handler(signum, frame):
             logger.info("Received shutdown signal, stopping bot...")
+            health_server.shutdown()
             handler.close()
             sys.exit(0)
 
