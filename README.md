@@ -6,6 +6,12 @@ A Slack bot that lets you save, retrieve, and browse personal notes directly fro
 
 - **Save notes** with `/take_notes` — stores text along with timestamp and channel context
 - **Browse notes** with `/my_notes` — paginated view with interactive Previous/Next buttons
+- **Edit notes** with `/edit_note` — update any note's text (tags are re-parsed automatically)
+- **Delete notes** with `/delete_note` — remove a note and its tags
+- **Search notes** with `/search_notes` — find notes by keyword with paginated results
+- **Tag support** with `/notes_by_tag` — organize and filter notes using `#hashtags`
+- **Connection pooling** — reuses MySQL connections for lower latency and fewer connections
+- **Health check endpoint** — HTTP `/healthz` endpoint for container orchestration
 - **Single-user mode** — restricts access to one authorized Slack user
 - **Rate limiting** — 5-second cooldown between commands to prevent spam
 - **Persistent storage** — all notes stored in a MySQL database
@@ -27,9 +33,13 @@ A Slack bot that lets you save, retrieve, and browse personal notes directly fro
    - `app_mentions:read`
 4. Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
 5. Copy the **Signing Secret** from the Basic Information page
-6. Register two slash commands:
+6. Register these slash commands:
    - `/take_notes` — Save a new note
    - `/my_notes` — View your saved notes
+   - `/edit_note` — Edit an existing note
+   - `/delete_note` — Delete a note
+   - `/search_notes` — Search notes by keyword
+   - `/notes_by_tag` — Browse notes by tag
 7. Find your Slack User ID (click your profile > three dots > "Copy member ID")
 
 ## Installation
@@ -173,6 +183,30 @@ You can specify a custom page size (1-20):
 /my_notes 10
 ```
 
+### Editing a Note
+
+```
+/edit_note 42 Updated note content here
+```
+
+Updates the text of note #42. Tags are automatically re-parsed from the new text.
+
+### Deleting a Note
+
+```
+/delete_note 42
+```
+
+Permanently deletes note #42 and all its associated tags.
+
+### Searching Notes
+
+```
+/search_notes groceries
+```
+
+Finds all notes containing "groceries" with paginated results.
+
 ### Limits
 
 | Constraint         | Value              |
@@ -197,6 +231,7 @@ You can specify a custom page size (1-20):
 | `MYSQL_DATABASE`       | Yes      | —       | MySQL database name                              |
 | `MYSQL_ROOT_PASSWORD`  | Yes      | —       | MySQL root password (Docker setup)               |
 | `MYSQL_SSL_CA`         | No       | —       | Path to SSL CA certificate for encrypted DB connections |
+| `HEALTH_CHECK_PORT`    | No       | `8080`  | Port for the `/healthz` HTTP endpoint            |
 | `LOG_LEVEL`            | No       | `INFO`  | Logging verbosity                                |
 
 ## Project Structure
