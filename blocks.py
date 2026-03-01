@@ -1,5 +1,33 @@
 import json
 
+from config import MAX_NOTE_LENGTH
+
+
+def build_edit_note_modal(note_id, current_text, channel_id=""):
+    """Build the Slack modal view for editing an existing note."""
+    return {
+        "type": "modal",
+        "callback_id": "edit_note_modal",
+        "private_metadata": json.dumps({"note_id": note_id, "channel_id": channel_id}),
+        "title": {"type": "plain_text", "text": f"Edit Note #{note_id}"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "note_text_block",
+                "label": {"type": "plain_text", "text": "Note text"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "note_text",
+                    "multiline": True,
+                    "initial_value": current_text,
+                    "max_length": MAX_NOTE_LENGTH,
+                },
+            }
+        ],
+    }
+
 
 def build_notes_blocks(notes, page, per_page, total_count):
     """Build Slack Block Kit blocks for a page of notes with prev/next navigation."""
