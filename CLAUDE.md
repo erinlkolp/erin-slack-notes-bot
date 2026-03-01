@@ -10,17 +10,19 @@ A single-user personal note management Slack bot. One authorized Slack user can 
 
 ```
 erin-slack-notes-bot/
-├── app.py              # Entry point: env validation, pool init, handler registration, Socket Mode startup
-├── handlers.py         # Slack slash commands, actions, and modal submissions (~506 lines)
-├── database.py         # MySQL connection pooling + all CRUD operations (~281 lines)
-├── tags.py             # #hashtag regex parsing + tag DB operations (~126 lines)
-├── blocks.py           # Slack Block Kit UI component builders (~97 lines)
-├── middleware.py       # Authorization decorator + rate limiting (~73 lines)
-├── health.py           # HTTP health check endpoint on /healthz (~60 lines)
-├── config.py           # Shared constants (limits, pool size, timeouts)
+├── app/
+│   ├── __init__.py     # Package marker
+│   ├── main.py         # Entry point: env validation, pool init, handler registration, Socket Mode startup (~136 lines)
+│   ├── handlers.py     # Slack slash commands, actions, and modal submissions (~505 lines)
+│   ├── database.py     # MySQL connection pooling + all CRUD operations (~280 lines)
+│   ├── tags.py         # #hashtag regex parsing + tag DB operations (~125 lines)
+│   ├── blocks.py       # Slack Block Kit UI component builders (~96 lines)
+│   ├── middleware.py   # Authorization decorator + rate limiting (~72 lines)
+│   ├── health.py       # HTTP health check endpoint on /healthz (~59 lines)
+│   └── config.py       # Shared constants (limits, pool size, timeouts)
 ├── requirements.txt    # Python dependencies
 ├── tests/
-│   └── test_app.py     # 61 unit tests with mocks (pytest)
+│   └── test_app.py     # 60 unit tests with mocks (pytest)
 ├── migrations/
 │   ├── 001-initial-schema.sql   # DB schema (notes + note_tags tables)
 │   └── changelog-master.xml     # Liquibase changelog config
@@ -32,29 +34,29 @@ erin-slack-notes-bot/
 ## Key Conventions
 
 ### Module Responsibilities
-- **`config.py`** is the single source of truth for all tunable constants. Edit constants there, not inline.
-- **`handlers.py`** only orchestrates: it calls database, tag, and block functions. Business logic lives in other modules.
-- **`database.py`** owns all SQL. No raw queries in other modules.
-- **`blocks.py`** owns all Slack Block Kit construction. No inline block dicts in handlers.
-- **`middleware.py`** owns authorization and rate limiting. All user-facing commands must go through `@require_allowed_user()`.
+- **`app/config.py`** is the single source of truth for all tunable constants. Edit constants there, not inline.
+- **`app/handlers.py`** only orchestrates: it calls database, tag, and block functions. Business logic lives in other modules.
+- **`app/database.py`** owns all SQL. No raw queries in other modules.
+- **`app/blocks.py`** owns all Slack Block Kit construction. No inline block dicts in handlers.
+- **`app/middleware.py`** owns authorization and rate limiting. All user-facing commands must go through `@require_allowed_user()`.
 
 ### Authorization
-Authorization is single-user only, enforced via `ALLOWED_SLACK_USER_ID`. Every slash command handler must be decorated with `@require_allowed_user()` from `middleware.py`. Do not add multi-user logic without redesigning the middleware.
+Authorization is single-user only, enforced via `ALLOWED_SLACK_USER_ID`. Every slash command handler must be decorated with `@require_allowed_user()` from `app/middleware.py`. Do not add multi-user logic without redesigning the middleware.
 
 ### Database
 - All queries use parameterized statements (`%s` placeholders). Never use f-strings or string concatenation to build SQL.
 - Always acquire connections via `get_db_connection(pool)` and release them in a `finally` block.
-- Connection retries use exponential backoff (configured in `config.py`: `DB_CONNECT_MAX_RETRIES`, `DB_CONNECT_BASE_DELAY`).
+- Connection retries use exponential backoff (configured in `app/config.py`: `DB_CONNECT_MAX_RETRIES`, `DB_CONNECT_BASE_DELAY`).
 - Pool size is `DB_POOL_SIZE = 5`. Don't exceed this without updating `docker-compose.yml` accordingly.
 
 ### Rate Limiting
-- `check_rate_limit(user_id, command)` in `middleware.py` enforces a per-user, per-command cooldown.
+- `check_rate_limit(user_id, command)` in `app/middleware.py` enforces a per-user, per-command cooldown.
 - The rate limit cache evicts stale entries when it exceeds `RATE_LIMIT_MAX_ENTRIES` (1000).
 - `RATE_LIMIT_SECONDS = 5` is the cooldown window.
 
 ### Notes and Tags
 - Notes are capped at `MAX_NOTE_LENGTH = 3000` characters (Slack modal character limit).
-- Tags are parsed from note text using the regex `#[A-Za-z0-9_]+` in `tags.py`.
+- Tags are parsed from note text using the regex `#[A-Za-z0-9_]+` in `app/tags.py`.
 - Tags are stored separately in `note_tags` with a FK cascade on delete.
 - When updating a note, always call `delete_tags_for_note()` then `save_tags()` — never update tags in place.
 
@@ -63,7 +65,7 @@ Authorization is single-user only, enforced via `ALLOWED_SLACK_USER_ID`. Every s
 - Page state (offset, query params) is serialized as JSON into Slack action `value` fields. Keep pagination payloads compact.
 
 ### Slack UI
-- Use `blocks.py` functions to build all UI output. Return blocks, not plain text, for list responses.
+- Use `app/blocks.py` functions to build all UI output. Return blocks, not plain text, for list responses.
 - Modals (used by `/edit_note`) must call `ack()` before opening views.
 - Use `respond()` for ephemeral replies to slash commands; use `client.views_open()` for modals.
 
@@ -87,7 +89,7 @@ The `liquibase` service runs migrations automatically on first start. The `slack
 ```bash
 pip install -r requirements.txt
 # Set all env vars from .env.example in your shell
-python app.py
+python -m app.main
 ```
 Requires a reachable MySQL instance and schema applied manually from `migrations/001-initial-schema.sql`.
 
@@ -115,7 +117,7 @@ Returns `{"status": "ok", "db_connection": true/false}`. Port is controlled by `
 | `HEALTH_CHECK_PORT` | No | `8080` | Port for health endpoint |
 | `LOG_LEVEL` | No | `INFO` | Python log level |
 
-Missing required variables cause `sys.exit(1)` at startup (validated in `app.py`).
+Missing required variables cause `sys.exit(1)` at startup (validated in `app/main.py`).
 
 ## Database Schema
 
@@ -170,7 +172,7 @@ All tests must pass before merging. There is no linter configured — maintain c
 ## Testing Conventions
 
 - Test classes are named `Test<FeatureName>` (e.g., `TestSaveNote`).
-- Each test method patches external dependencies (`mysql.connector`, `get_db_connection`, `os.environ`) using `@patch` or `patch.object`.
+- Each test method patches external dependencies (`mysql.connector`, `get_db_connection`, `os.environ`) using `@patch` or `patch.object`. Patch targets use the `app.*` namespace (e.g., `app.database.mysql.connector`).
 - Use `MagicMock` for DB cursors and connections.
 - Tests are fully isolated — no shared state between test classes.
 - When adding a new function, add a corresponding `Test<Function>` class in `tests/test_app.py`.
