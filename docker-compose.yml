@@ -26,6 +26,9 @@ services:
     image: percona/percona-server:8.0.39
     restart: always
     platform: linux/amd64
+    command:
+      - --log-error-verbosity=1
+      - --default-authentication-plugin=caching_sha2_password
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
