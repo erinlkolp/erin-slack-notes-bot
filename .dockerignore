@@ -15,3 +15,7 @@ venv
 .ruff_cache
 .vscode
 .idea
+Dockerfile*
+docker-compose*
+CLAUDE.md
+
