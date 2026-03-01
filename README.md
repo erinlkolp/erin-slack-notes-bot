@@ -236,9 +236,10 @@ Finds all notes containing "groceries" with paginated results.
 
 ## Tech Stack
 
-- **Python 3.12** — application runtime
+- **Python 3.14** — application runtime
 - **[Slack Bolt](https://slack.dev/bolt-python/)** — Slack app framework
 - **MySQL (Percona Server 8.0)** — note storage
+- **Liquibase** — automated db schema migrations
 - **Docker & Docker Compose** — containerization and orchestration
 
 ## License
