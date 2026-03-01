@@ -4,7 +4,7 @@ import logging
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
-MAX_NOTE_LENGTH = 4000
+MAX_NOTE_LENGTH = 3000
 NOTES_PER_PAGE = 5
 RATE_LIMIT_SECONDS = 5
 RATE_LIMIT_MAX_ENTRIES = 1000
