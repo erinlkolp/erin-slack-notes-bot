@@ -1,4 +1,4 @@
-FROM liquibase/liquibase:4.29
+FROM liquibase/liquibase:5.0
 
 # Install the MySQL JDBC driver into the Liquibase lib directory
 USER root
