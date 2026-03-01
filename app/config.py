@@ -6,7 +6,7 @@ logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
 MAX_NOTE_LENGTH = 3000
 NOTES_PER_PAGE = 5
-RATE_LIMIT_SECONDS = 5
+RATE_LIMIT_SECONDS = 1
 RATE_LIMIT_MAX_ENTRIES = 1000
 DB_CONNECT_MAX_RETRIES = 3
 DB_CONNECT_BASE_DELAY = 1  # seconds, doubles each retry

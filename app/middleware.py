@@ -70,7 +70,7 @@ def require_allowed_user(command_name=None, is_view=False):
 
             if command_name and check_rate_limit(user_id, command_name):
                 if respond:
-                    respond("⏳ Please wait a few seconds before sending another command.")
+                    respond("⏳ Please wait a moment before sending another command.")
                 return
 
             return fn(*args, **kwargs)
