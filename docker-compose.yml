@@ -9,6 +9,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      liquibase:
+        condition: service_completed_successfully
     ports:
       - "${HEALTH_CHECK_PORT:-8080}:${HEALTH_CHECK_PORT:-8080}"
     environment:
@@ -30,6 +32,23 @@ services:
       retries: 3
       start_period: 15s
 
+  liquibase:
+    container_name: liquibase
+    build:
+      context: .
+      dockerfile: Dockerfile.liquibase
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/liquibase/changelog
+    environment:
+      LIQUIBASE_COMMAND_URL: jdbc:mysql://db:3306/${MYSQL_DATABASE}
+      LIQUIBASE_COMMAND_USERNAME: ${MYSQL_USER}
+      LIQUIBASE_COMMAND_PASSWORD: ${MYSQL_PASSWORD}
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog-master.xml
+    command: update
+
   db:
     container_name: db
     image: percona/percona-server:8.0.39
@@ -45,7 +64,6 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - my-db:/var/lib/mysql
-      - ./slackbotdb.sql:/docker-entrypoint-initdb.d/1.sql # Seeds the database schema
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 15s

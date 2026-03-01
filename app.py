@@ -6,7 +6,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from database import init_db_pool, setup_database
+from database import init_db_pool, verify_connection
 from handlers import register_handlers
 from health import start_health_check_server
 
@@ -88,7 +88,7 @@ if not init_db_pool():
     sys.exit(1)
 
 logger.info("Testing database connection...")
-if setup_database():
+if verify_connection():
     logger.info("Database connection successful")
 else:
     logger.error(

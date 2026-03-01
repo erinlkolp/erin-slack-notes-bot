@@ -1,8 +1,8 @@
-CREATE DATABASE IF NOT EXISTS slack_notes;
+--liquibase formatted sql
 
-USE slack_notes;
-
-CREATE TABLE IF NOT EXISTS notes (
+--changeset erin:1
+--comment: Create notes table
+CREATE TABLE notes (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL,
     username VARCHAR(255),
@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS notes (
     INDEX idx_user_created (user_id, created_at)
 );
 
-CREATE TABLE IF NOT EXISTS note_tags (
+--changeset erin:2
+--comment: Create note_tags table
+CREATE TABLE note_tags (
     id INT AUTO_INCREMENT PRIMARY KEY,
     note_id INT NOT NULL,
     tag VARCHAR(255) NOT NULL,
