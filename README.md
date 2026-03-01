@@ -234,19 +234,6 @@ Finds all notes containing "groceries" with paginated results.
 | `HEALTH_CHECK_PORT`    | No       | `8080`  | Port for the `/healthz` HTTP endpoint            |
 | `LOG_LEVEL`            | No       | `INFO`  | Logging verbosity                                |
 
-## Project Structure
-
-```
-erin-slack-notes-bot/
-├── app.py               # Main bot application
-├── requirements.txt     # Python dependencies
-├── Dockerfile           # Container image definition
-├── docker-compose.yml   # Multi-container orchestration
-├── slackbotdb.sql       # Database schema
-├── .env.example         # Example environment configuration
-└── LICENSE              # MIT License
-```
-
 ## Tech Stack
 
 - **Python 3.12** — application runtime
