@@ -4,7 +4,7 @@ import logging
 from mysql.connector import Error
 from mysql.connector.pooling import MySQLConnectionPool
 
-from config import DB_CONNECT_MAX_RETRIES, DB_CONNECT_BASE_DELAY, DB_POOL_SIZE
+from .config import DB_CONNECT_MAX_RETRIES, DB_CONNECT_BASE_DELAY, DB_POOL_SIZE
 
 logger = logging.getLogger(__name__)
 

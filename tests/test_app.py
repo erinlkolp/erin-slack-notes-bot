@@ -16,12 +16,12 @@ import pytest
 # import time, so no patching is needed just to import them.
 # ---------------------------------------------------------------------------
 
-import config
-import database
-import tags
-import blocks
-import middleware
-import health
+from app import config
+from app import database
+from app import tags
+from app import blocks
+from app import middleware
+from app import health
 
 # Set the allowed user that middleware reads at import time.
 middleware.allowed_user_id = "U_ALLOWED"
@@ -199,8 +199,8 @@ class TestInitDbPool:
     def teardown_method(self):
         database._db_pool = self._orig_pool
 
-    @patch("database.time.sleep")
-    @patch("database.MySQLConnectionPool")
+    @patch("app.database.time.sleep")
+    @patch("app.database.MySQLConnectionPool")
     def test_creates_pool_on_first_try(self, mock_pool_cls, mock_sleep):
         mock_pool = MagicMock()
         mock_pool_cls.return_value = mock_pool
@@ -209,8 +209,8 @@ class TestInitDbPool:
         assert database._db_pool is mock_pool
         mock_sleep.assert_not_called()
 
-    @patch("database.time.sleep")
-    @patch("database.MySQLConnectionPool")
+    @patch("app.database.time.sleep")
+    @patch("app.database.MySQLConnectionPool")
     def test_retries_then_succeeds(self, mock_pool_cls, mock_sleep):
         from mysql.connector import Error
 
@@ -221,8 +221,8 @@ class TestInitDbPool:
         assert database._db_pool is mock_pool
         mock_sleep.assert_called_once_with(1)
 
-    @patch("database.time.sleep")
-    @patch("database.MySQLConnectionPool")
+    @patch("app.database.time.sleep")
+    @patch("app.database.MySQLConnectionPool")
     def test_returns_false_after_all_retries(self, mock_pool_cls, mock_sleep):
         from mysql.connector import Error
 
@@ -240,7 +240,7 @@ class TestGetDbConnectionRetry:
     def teardown_method(self):
         database._db_pool = self._orig_pool
 
-    @patch("database.time.sleep")
+    @patch("app.database.time.sleep")
     def test_succeeds_on_first_try(self, mock_sleep):
         mock_pool = MagicMock()
         mock_conn = MagicMock()
@@ -250,7 +250,7 @@ class TestGetDbConnectionRetry:
         assert database.get_db_connection() is mock_conn
         mock_sleep.assert_not_called()
 
-    @patch("database.time.sleep")
+    @patch("app.database.time.sleep")
     def test_retries_then_succeeds(self, mock_sleep):
         from mysql.connector import Error
 
@@ -262,7 +262,7 @@ class TestGetDbConnectionRetry:
         assert database.get_db_connection() is mock_conn
         mock_sleep.assert_called_once_with(1)
 
-    @patch("database.time.sleep")
+    @patch("app.database.time.sleep")
     def test_all_retries_fail_returns_none(self, mock_sleep):
         from mysql.connector import Error
 
@@ -273,7 +273,7 @@ class TestGetDbConnectionRetry:
         assert database.get_db_connection() is None
         assert mock_sleep.call_count == config.DB_CONNECT_MAX_RETRIES - 1
 
-    @patch("database.time.sleep")
+    @patch("app.database.time.sleep")
     def test_exponential_backoff_delays(self, mock_sleep):
         from mysql.connector import Error
 
@@ -285,7 +285,7 @@ class TestGetDbConnectionRetry:
         delays = [c[0][0] for c in mock_sleep.call_args_list]
         assert delays == [1, 2]
 
-    @patch("database.time.sleep")
+    @patch("app.database.time.sleep")
     def test_returns_none_when_pool_not_initialized(self, mock_sleep):
         database._db_pool = None
         assert database.get_db_connection() is None
@@ -296,7 +296,7 @@ class TestGetDbConnectionRetry:
 
 
 class TestSaveNote:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_note_id_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -309,12 +309,12 @@ class TestSaveNote:
         mock_cursor.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_when_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert database.save_note("U1", "alice", "hello") is False
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_on_db_error(self, mock_get_conn):
         from mysql.connector import Error
 
@@ -332,7 +332,7 @@ class TestSaveNote:
 
 
 class TestGetNotesPage:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_notes_and_count(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -350,7 +350,7 @@ class TestGetNotesPage:
         assert total == 3
         assert len(notes) == 2
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         notes, total = database.get_notes_page("U1", page=1, per_page=5)
@@ -362,7 +362,7 @@ class TestGetNotesPage:
 
 
 class TestSaveTags:
-    @patch("tags.get_db_connection")
+    @patch("app.tags.get_db_connection")
     def test_inserts_tags(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -375,7 +375,7 @@ class TestSaveTags:
         assert mock_cursor.executemany.call_args[0][1] == [(42, "bug"), (42, "backend")]
         mock_conn.commit.assert_called_once()
 
-    @patch("tags.get_db_connection")
+    @patch("app.tags.get_db_connection")
     def test_noop_for_empty_tags(self, mock_get_conn):
         tags.save_tags(42, [])
         mock_get_conn.assert_not_called()
@@ -385,7 +385,7 @@ class TestSaveTags:
 
 
 class TestGetNoteById:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_note_when_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -397,7 +397,7 @@ class TestGetNoteById:
 
         assert database.get_note_by_id(1, "U1") == (1, "hello", now, "general")
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_none_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -408,7 +408,7 @@ class TestGetNoteById:
 
         assert database.get_note_by_id(999, "U1") is None
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert database.get_note_by_id(1, "U1") is None
@@ -418,7 +418,7 @@ class TestGetNoteById:
 
 
 class TestUpdateNote:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -430,7 +430,7 @@ class TestUpdateNote:
         assert database.update_note(1, "U1", "updated text") is True
         mock_conn.commit.assert_called_once()
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -441,7 +441,7 @@ class TestUpdateNote:
 
         assert database.update_note(999, "U1", "updated text") is False
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert database.update_note(1, "U1", "updated") is False
@@ -451,7 +451,7 @@ class TestUpdateNote:
 
 
 class TestDeleteNote:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -463,7 +463,7 @@ class TestDeleteNote:
         assert database.delete_note(1, "U1") is True
         mock_conn.commit.assert_called_once()
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_when_not_found(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -474,7 +474,7 @@ class TestDeleteNote:
 
         assert database.delete_note(999, "U1") is False
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert database.delete_note(1, "U1") is False
@@ -484,7 +484,7 @@ class TestDeleteNote:
 
 
 class TestDeleteTagsForNote:
-    @patch("tags.get_db_connection")
+    @patch("app.tags.get_db_connection")
     def test_returns_true_on_success(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -496,7 +496,7 @@ class TestDeleteTagsForNote:
         mock_cursor.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
 
-    @patch("tags.get_db_connection")
+    @patch("app.tags.get_db_connection")
     def test_returns_false_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         assert tags.delete_tags_for_note(42) is False
@@ -506,7 +506,7 @@ class TestDeleteTagsForNote:
 
 
 class TestSearchNotes:
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_matching_notes(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -524,14 +524,14 @@ class TestSearchNotes:
         assert total == 2
         assert len(notes) == 2
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_returns_none_on_no_connection(self, mock_get_conn):
         mock_get_conn.return_value = None
         notes, total = database.search_notes("U1", "keyword", page=1, per_page=5)
         assert notes is None
         assert total == 0
 
-    @patch("database.get_db_connection")
+    @patch("app.database.get_db_connection")
     def test_uses_like_pattern(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -550,7 +550,7 @@ class TestSearchNotes:
 
 
 class TestCheckHealth:
-    @patch("health.get_db_connection")
+    @patch("app.health.get_db_connection")
     def test_healthy_when_db_connected(self, mock_get_conn):
         mock_conn = MagicMock()
         mock_conn.is_connected.return_value = True
@@ -560,7 +560,7 @@ class TestCheckHealth:
         assert healthy is True
         assert message == "ok"
 
-    @patch("health.get_db_connection")
+    @patch("app.health.get_db_connection")
     def test_unhealthy_when_db_unavailable(self, mock_get_conn):
         mock_get_conn.return_value = None
 
@@ -568,7 +568,7 @@ class TestCheckHealth:
         assert healthy is False
         assert "database" in message
 
-    @patch("health.get_db_connection")
+    @patch("app.health.get_db_connection")
     def test_unhealthy_on_exception(self, mock_get_conn):
         mock_get_conn.side_effect = RuntimeError("boom")
 

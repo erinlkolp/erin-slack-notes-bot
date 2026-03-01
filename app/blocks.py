@@ -1,6 +1,6 @@
 import json
 
-from config import MAX_NOTE_LENGTH
+from .config import MAX_NOTE_LENGTH
 
 
 def build_edit_note_modal(note_id, current_text, channel_id=""):

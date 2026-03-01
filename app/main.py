@@ -6,9 +6,9 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from database import init_db_pool, verify_connection
-from handlers import register_handlers
-from health import start_health_check_server
+from .database import init_db_pool, verify_connection
+from .handlers import register_handlers
+from .health import start_health_check_server
 
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, log_level, logging.INFO))

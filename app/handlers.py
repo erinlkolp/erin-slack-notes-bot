@@ -2,8 +2,8 @@ import json
 import logging
 from datetime import datetime
 
-from config import MAX_NOTE_LENGTH, NOTES_PER_PAGE
-from database import (
+from .config import MAX_NOTE_LENGTH, NOTES_PER_PAGE
+from .database import (
     delete_note,
     get_note_by_id,
     get_notes_page,
@@ -11,15 +11,15 @@ from database import (
     search_notes,
     update_note,
 )
-from tags import (
+from .tags import (
     delete_tags_for_note,
     get_notes_by_tag,
     get_user_tags,
     parse_tags,
     save_tags,
 )
-from blocks import build_edit_note_modal, build_notes_blocks
-from middleware import allowed_user_id, require_allowed_user
+from .blocks import build_edit_note_modal, build_notes_blocks
+from .middleware import allowed_user_id, require_allowed_user
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def register_handlers(app):
             if message.get("bot_id") or message.get("subtype") == "bot_message":
                 return
 
-            import middleware
+            from . import middleware
             if user_id != middleware.allowed_user_id:
                 return
 
@@ -55,7 +55,7 @@ def register_handlers(app):
             user = event.get("user")
             text = event.get("text", "")
 
-            import middleware
+            from . import middleware
             if user != middleware.allowed_user_id:
                 logger.info(f"Ignoring mention from unauthorized user: {user}")
                 return
