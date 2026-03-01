@@ -47,7 +47,7 @@ services:
       LIQUIBASE_COMMAND_USERNAME: ${MYSQL_USER}
       LIQUIBASE_COMMAND_PASSWORD: ${MYSQL_PASSWORD}
       LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog-master.xml
-    command: update
+    entrypoint: ["sh", "-c", "sleep 10 && /liquibase/docker-entrypoint.sh update"]
 
   db:
     container_name: db
