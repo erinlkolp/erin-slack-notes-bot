@@ -454,7 +454,7 @@ def handle_my_notes(ack, respond, command, logger):
 
 @app.action("notes_prev_page")
 @app.action("notes_next_page")
-def handle_notes_pagination(ack, body, client, logger):
+def handle_notes_pagination(ack, body, respond, logger):
     """Handle Previous / Next button clicks for note pagination."""
     try:
         ack()
@@ -475,13 +475,8 @@ def handle_notes_pagination(ack, body, client, logger):
 
         blocks = build_notes_blocks(notes, page, per_page, total_count)
 
-        # Update the existing message in place
-        client.chat_update(
-            channel=body["channel"]["id"],
-            ts=body["message"]["ts"],
-            blocks=blocks,
-            text="Your Notes",
-        )
+        # Use respond with replace_original to update the ephemeral message
+        respond(blocks=blocks, replace_original=True)
 
     except Exception as e:
         logger.error(f"Error handling notes pagination: {e}")
