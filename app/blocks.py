@@ -3,6 +3,17 @@ import json
 from .config import MAX_NOTE_LENGTH
 
 
+def escape_mrkdwn(text):
+    """Escape Slack mrkdwn special characters to prevent mention/link injection.
+
+    Slack treats <@U...>, <!here>, <!channel>, <!everyone>, and <URL|text>
+    as active elements in mrkdwn surfaces.  Escaping & < > neutralises all of
+    them so user-supplied note text is rendered literally.
+    Order matters: & must be replaced first to avoid double-escaping.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def build_edit_note_modal(note_id, current_text, channel_id=""):
     """Build the Slack modal view for editing an existing note."""
     return {
@@ -55,6 +66,7 @@ def build_notes_blocks(notes, page, per_page, total_count):
 
     for note_id, note_text, created_at, channel_name in notes:
         display_text = note_text if len(note_text) <= 200 else note_text[:197] + "..."
+        display_text = escape_mrkdwn(display_text)
         channel_info = f"  #{channel_name}" if channel_name else ""
         blocks.append(
             {

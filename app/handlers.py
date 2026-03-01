@@ -18,7 +18,7 @@ from .tags import (
     parse_tags,
     save_tags,
 )
-from .blocks import build_edit_note_modal, build_notes_blocks
+from .blocks import build_edit_note_modal, build_notes_blocks, escape_mrkdwn
 from .middleware import allowed_user_id, require_allowed_user
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ def register_handlers(app):
                     f"✅ Note saved successfully!\n"
                     f"📝 Note ID: {note_id}\n"
                     f"👤 User: {user_name}\n"
-                    f"📄 Note: \"{note_text}\"\n"
+                    f"📄 Note: \"{escape_mrkdwn(note_text)}\"\n"
                     f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 if channel_name:
@@ -311,7 +311,7 @@ def register_handlers(app):
 
             ack()
 
-            confirmation = f"✅ Note #{note_id} updated successfully!\n📄 New text: \"{new_text}\""
+            confirmation = f"✅ Note #{note_id} updated successfully!\n📄 New text: \"{escape_mrkdwn(new_text)}\""
             if tags:
                 confirmation += f"\n🏷️ Tags: {', '.join('#' + t for t in tags)}"
 
