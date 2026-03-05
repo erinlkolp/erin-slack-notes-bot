@@ -73,10 +73,12 @@ def register_handlers(app):
     def handle_take_notes(ack, respond, command, client, logger):
         """Save a new note.  Usage: /take_notes <text>"""
         try:
+            respond_kwargs = {}
             user_id = command.get("user_id")
             user_name = command.get("user_name", "Unknown")
             note_text = command.get("text", "").strip()
             channel_id = command.get("channel_id")
+            thread_ts = command.get("thread_ts")
 
             channel_name = None
             try:
@@ -86,17 +88,21 @@ def register_handlers(app):
             except Exception as e:
                 logger.warning(f"Could not fetch channel name for {channel_id}: {e}")
 
+            respond_kwargs = {"thread_ts": thread_ts} if thread_ts else {}
+
             if not note_text:
                 respond(
                     "❌ Please provide some text to save as a note.\n"
-                    "Usage: `/take_notes Your note text here`"
+                    "Usage: `/take_notes Your note text here`",
+                    **respond_kwargs,
                 )
                 return
 
             if len(note_text) > MAX_NOTE_LENGTH:
                 respond(
                     f"❌ Note is too long ({len(note_text)} characters). "
-                    f"Maximum is {MAX_NOTE_LENGTH} characters."
+                    f"Maximum is {MAX_NOTE_LENGTH} characters.",
+                    **respond_kwargs,
                 )
                 return
 
@@ -114,8 +120,6 @@ def register_handlers(app):
                     f"📄 Note: \"{escape_mrkdwn(note_text)}\"\n"
                     f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-                if channel_name:
-                    response += f"\n📍 Channel: #{channel_name}"
                 if tags:
                     response += f"\n🏷️ Tags: {', '.join('#' + t for t in tags)}"
             else:
@@ -124,12 +128,12 @@ def register_handlers(app):
                     "Please check the database connection."
                 )
 
-            respond(response)
+            respond(response, **respond_kwargs)
             logger.info(f"Note saved for user {user_name}")
 
         except Exception as e:
             logger.error(f"Error handling /take_notes command: {e}")
-            respond("❌ An error occurred while saving your note. Please try again.")
+            respond("❌ An error occurred while saving your note. Please try again.", **respond_kwargs)
 
     @app.command("/my_notes")
     @require_allowed_user(command_name="my_notes")
