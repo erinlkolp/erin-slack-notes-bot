@@ -61,8 +61,14 @@ def delete_tags_for_note(note_id):
             connection.close()
 
 
-def get_notes_by_tag(user_id, tag, page, per_page):
-    """Fetch a page of notes that carry a given tag. Returns (notes_list, total_count)."""
+def get_notes_by_tag(user_id, tags, page, per_page):
+    """Fetch a page of notes that carry ALL of the given tags (AND semantics).
+
+    Args:
+        tags: list of tag strings (without leading #). Must be non-empty.
+
+    Returns (notes_list, total_count) or (None, 0) on error.
+    """
     connection = None
     cursor = None
     try:
@@ -71,11 +77,18 @@ def get_notes_by_tag(user_id, tag, page, per_page):
             return None, 0
         cursor = connection.cursor()
 
+        lowered = [t.lower() for t in tags]
+        placeholders = ", ".join(["%s"] * len(lowered))
+
         cursor.execute(
-            "SELECT COUNT(*) FROM notes n "
+            "SELECT COUNT(*) FROM ("
+            "SELECT n.id FROM notes n "
             "JOIN note_tags t ON n.id = t.note_id "
-            "WHERE n.user_id = %s AND t.tag = %s",
-            (user_id, tag.lower()),
+            f"WHERE n.user_id = %s AND t.tag IN ({placeholders}) "
+            "GROUP BY n.id "
+            "HAVING COUNT(DISTINCT t.tag) = %s"
+            ") AS matching_notes",
+            [user_id] + lowered + [len(lowered)],
         )
         total_count = cursor.fetchone()[0]
 
@@ -83,9 +96,11 @@ def get_notes_by_tag(user_id, tag, page, per_page):
         cursor.execute(
             "SELECT n.id, n.note_text, n.created_at, n.channel_name "
             "FROM notes n JOIN note_tags t ON n.id = t.note_id "
-            "WHERE n.user_id = %s AND t.tag = %s "
+            f"WHERE n.user_id = %s AND t.tag IN ({placeholders}) "
+            "GROUP BY n.id, n.note_text, n.created_at, n.channel_name "
+            "HAVING COUNT(DISTINCT t.tag) = %s "
             "ORDER BY n.created_at DESC LIMIT %s OFFSET %s",
-            (user_id, tag.lower(), per_page, offset),
+            [user_id] + lowered + [len(lowered), per_page, offset],
         )
         return cursor.fetchall(), total_count
 

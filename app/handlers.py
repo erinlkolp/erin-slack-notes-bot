@@ -166,12 +166,16 @@ def register_handlers(app):
     @app.command("/notes_by_tag")
     @require_allowed_user(command_name="notes_by_tag")
     def handle_notes_by_tag(ack, respond, command, logger):
-        """List notes by tag.  Usage: /notes_by_tag [tag]  (no arg = list all tags)"""
+        """List notes by tag(s).  Usage: /notes_by_tag [tag …]  (no arg = list all tags)
+
+        Multiple tags are space- or comma-separated; results must carry ALL tags.
+        """
         try:
             user_id = command.get("user_id")
-            text = command.get("text", "").strip().lstrip("#").lower()
+            raw = command.get("text", "").strip()
+            tags_input = [t.lstrip("#").lower() for t in raw.replace(",", " ").split() if t.lstrip("#")]
 
-            if not text:
+            if not tags_input:
                 user_tags = get_user_tags(user_id)
                 if user_tags is None:
                     respond("❌ Database connection error.")
@@ -190,26 +194,27 @@ def register_handlers(app):
 
             page = 1
             per_page = NOTES_PER_PAGE
-            notes, total_count = get_notes_by_tag(user_id, text, page, per_page)
+            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page)
 
             if notes is None:
                 respond("❌ Database connection error.")
                 return
 
+            tag_label = " ".join(f"#{t}" for t in tags_input)
             if not notes:
-                respond(f"No notes found with tag *#{text}*.")
+                respond(f"No notes found with tags *{tag_label}*.")
                 return
 
             blocks = build_notes_blocks(notes, page, per_page, total_count)
             blocks[0] = {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"Notes tagged #{text}"},
+                "text": {"type": "plain_text", "text": f"Notes tagged {tag_label}"},
             }
             for block in blocks:
                 if block.get("type") == "actions":
                     for element in block["elements"]:
                         payload = json.loads(element["value"])
-                        payload["tag"] = text
+                        payload["tags"] = tags_input
                         element["value"] = json.dumps(payload)
                         if element["action_id"] == "notes_prev_page":
                             element["action_id"] = "tag_notes_prev_page"
@@ -433,22 +438,23 @@ def register_handlers(app):
         try:
             user_id = body["user"]["id"]
             payload = json.loads(body["actions"][0]["value"])
-            page, per_page, tag = payload["page"], payload["per_page"], payload["tag"]
+            page, per_page, tags_input = payload["page"], payload["per_page"], payload["tags"]
 
-            notes, total_count = get_notes_by_tag(user_id, tag, page, per_page)
+            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page)
             if notes is None:
                 return
 
+            tag_label = " ".join(f"#{t}" for t in tags_input)
             blocks = build_notes_blocks(notes, page, per_page, total_count)
             blocks[0] = {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"Notes tagged #{tag}"},
+                "text": {"type": "plain_text", "text": f"Notes tagged {tag_label}"},
             }
             for block in blocks:
                 if block.get("type") == "actions":
                     for element in block["elements"]:
                         p = json.loads(element["value"])
-                        p["tag"] = tag
+                        p["tags"] = tags_input
                         element["value"] = json.dumps(p)
                         if element["action_id"] == "notes_prev_page":
                             element["action_id"] = "tag_notes_prev_page"

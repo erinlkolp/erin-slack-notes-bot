@@ -562,6 +562,101 @@ class TestDeleteTagsForNote:
         assert tags.delete_tags_for_note(42) is False
 
 
+# ── get_notes_by_tag ──────────────────────────────────────────────────────────
+
+
+class TestGetNotesByTag:
+    def _make_mock_conn(self, fetchone_return, fetchall_return):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = fetchone_return
+        mock_cursor.fetchall.return_value = fetchall_return
+        mock_conn.cursor.return_value = mock_cursor
+        return mock_conn, mock_cursor
+
+    @patch("app.tags.get_db_connection")
+    def test_returns_notes_for_single_tag(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(2,),
+            fetchall_return=[(1, "note a", now, "general"), (2, "note b", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        notes, total = tags.get_notes_by_tag("U1", ["bug"], page=1, per_page=5)
+        assert total == 2
+        assert len(notes) == 2
+
+    @patch("app.tags.get_db_connection")
+    def test_returns_notes_for_multiple_tags_and_semantics(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(1,),
+            fetchall_return=[(3, "shared note", now, "dev")],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        notes, total = tags.get_notes_by_tag("U1", ["bug", "backend"], page=1, per_page=5)
+        assert total == 1
+        assert len(notes) == 1
+        # Both tags must appear in the IN clause parameters
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        assert "bug" in count_call_args[1]
+        assert "backend" in count_call_args[1]
+        # HAVING count must equal the number of tags (AND semantics)
+        assert 2 in count_call_args[1]
+
+    @patch("app.tags.get_db_connection")
+    def test_tags_are_lowercased(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(1,),
+            fetchall_return=[(1, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["Bug", "BACKEND"], page=1, per_page=5)
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        assert "bug" in count_call_args[1]
+        assert "backend" in count_call_args[1]
+        assert "Bug" not in count_call_args[1]
+
+    @patch("app.tags.get_db_connection")
+    def test_returns_empty_list_when_no_match(self, mock_get_conn):
+        mock_conn, _ = self._make_mock_conn(
+            fetchone_return=(0,),
+            fetchall_return=[],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        notes, total = tags.get_notes_by_tag("U1", ["nonexistent"], page=1, per_page=5)
+        assert total == 0
+        assert notes == []
+
+    @patch("app.tags.get_db_connection")
+    def test_returns_none_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        notes, total = tags.get_notes_by_tag("U1", ["bug"], page=1, per_page=5)
+        assert notes is None
+        assert total == 0
+
+    @patch("app.tags.get_db_connection")
+    def test_pagination_offset_applied(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(10,),
+            fetchall_return=[(6, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["bug"], page=3, per_page=5)
+        fetch_call_args = mock_cursor.execute.call_args_list[1][0]
+        # offset should be (3-1)*5 = 10, per_page = 5
+        assert 10 in fetch_call_args[1]
+        assert 5 in fetch_call_args[1]
+
+
 # ── search_notes ──────────────────────────────────────────────────────────────
 
 
