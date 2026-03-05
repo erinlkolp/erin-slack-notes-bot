@@ -253,10 +253,11 @@ def search_notes(user_id, keyword, page, per_page):
             return None, 0
 
         cursor = connection.cursor()
-        like_pattern = f"%{keyword}%"
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_pattern = f"%{escaped}%"
 
         cursor.execute(
-            "SELECT COUNT(*) FROM notes WHERE user_id = %s AND note_text LIKE %s",
+            "SELECT COUNT(*) FROM notes WHERE user_id = %s AND note_text LIKE %s ESCAPE '\\\\'",
             (user_id, like_pattern),
         )
         total_count = cursor.fetchone()[0]
@@ -264,7 +265,7 @@ def search_notes(user_id, keyword, page, per_page):
         offset = (page - 1) * per_page
         cursor.execute(
             "SELECT id, note_text, created_at, channel_name "
-            "FROM notes WHERE user_id = %s AND note_text LIKE %s "
+            "FROM notes WHERE user_id = %s AND note_text LIKE %s ESCAPE '\\\\' "
             "ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (user_id, like_pattern, per_page, offset),
         )
