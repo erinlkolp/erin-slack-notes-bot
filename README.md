@@ -13,7 +13,7 @@ A Slack bot that lets you save, retrieve, and browse personal notes directly fro
 - **Connection pooling** — reuses MySQL connections for lower latency and fewer connections
 - **Health check endpoint** — HTTP `/healthz` endpoint for container orchestration
 - **Single-user mode** — restricts access to one authorized Slack user
-- **Rate limiting** — 5-second cooldown between commands to prevent spam
+- **Rate limiting** — 1-second cooldown between commands to prevent spam
 - **Persistent storage** — all notes stored in a MySQL database
 - **Configurable logging** — adjustable log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
@@ -147,16 +147,16 @@ If you prefer to run without Docker, you'll need Python 3.12+ and a running MySQ
    export MYSQL_DATABASE=slack_notes
    ```
 
-3. **Initialize the database** by running `slackbotdb.sql` against your MySQL server:
+3. **Initialize the database** by running the migration SQL against your MySQL server:
 
    ```bash
-   mysql -u root -p < slackbotdb.sql
+   mysql -u root -p < migrations/001-initial-schema.sql
    ```
 
 4. **Start the bot:**
 
    ```bash
-   python app.py
+   python -m app.main
    ```
 
 ## Usage
@@ -186,10 +186,10 @@ You can specify a custom page size (1-20):
 ### Editing a Note
 
 ```
-/edit_note 42 Updated note content here
+/edit_note 42
 ```
 
-Updates the text of note #42. Tags are automatically re-parsed from the new text.
+Opens a modal pre-filled with the current text of note #42. Edit and click **Save** to update. Tags are automatically re-parsed from the new text.
 
 ### Deleting a Note
 
@@ -207,14 +207,34 @@ Permanently deletes note #42 and all its associated tags.
 
 Finds all notes containing "groceries" with paginated results.
 
+### Browsing by Tag
+
+```
+/notes_by_tag
+```
+
+Lists all your tags with note counts.
+
+```
+/notes_by_tag work
+```
+
+Shows all notes tagged `#work`.
+
+```
+/notes_by_tag work important
+```
+
+Shows notes that carry **both** `#work` and `#important` (AND semantics).
+
 ### Limits
 
 | Constraint         | Value              |
 | ------------------ | ------------------ |
-| Max note length    | 4,000 characters   |
+| Max note length    | 3,000 characters   |
 | Default page size  | 5 notes            |
 | Max page size      | 20 notes           |
-| Rate limit         | 5 seconds between commands |
+| Rate limit         | 1 second between commands |
 
 ## Configuration
 
@@ -224,7 +244,7 @@ Finds all notes containing "groceries" with paginated results.
 | `SLACK_SIGNING_SECRET` | Yes      | —       | Request signing secret                           |
 | `SLACK_APP_TOKEN`      | Yes      | —       | App-level token for Socket Mode (`xapp-...`)     |
 | `ALLOWED_SLACK_USER_ID`| Yes      | —       | Slack user ID authorized to use the bot          |
-| `MYSQL_HOST`           | Yes      | `db`    | MySQL hostname                                   |
+| `MYSQL_HOST`           | No       | `localhost` | MySQL hostname (hardcoded to `db` in `docker-compose.yml`) |
 | `MYSQL_PORT`           | No       | `3306`  | MySQL port                                       |
 | `MYSQL_USER`           | Yes      | —       | MySQL username                                   |
 | `MYSQL_PASSWORD`       | Yes      | —       | MySQL password                                   |
