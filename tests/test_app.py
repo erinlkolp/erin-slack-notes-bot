@@ -123,6 +123,24 @@ class TestBuildNotesBlocks:
         assert "&lt;@U12345&gt;" in display
         assert "&amp;" in display
 
+    def test_note_header_uses_hash_id(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(42, "some text", now, None)], page=1, per_page=5, total_count=1)
+        section = [b for b in result if b.get("type") == "section"][0]
+        assert "*#42*" in section["text"]["text"]
+
+    def test_note_header_includes_channel_name(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(1, "text", now, "general")], page=1, per_page=5, total_count=1)
+        section = [b for b in result if b.get("type") == "section"][0]
+        assert "#general" in section["text"]["text"]
+
+    def test_note_header_omits_channel_when_none(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(1, "text", now, None)], page=1, per_page=5, total_count=1)
+        section = [b for b in result if b.get("type") == "section"][0]
+        assert " — #" not in section["text"]["text"].split("\n")[0]
+
 
 # ── escape_mrkdwn ─────────────────────────────────────────────────────────────
 
