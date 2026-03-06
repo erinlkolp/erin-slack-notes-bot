@@ -64,16 +64,17 @@ def build_notes_blocks(notes, page, per_page, total_count):
         {"type": "divider"},
     ]
 
-    for note_id, note_text, created_at, *_ in notes:
+    for note_id, note_text, created_at, channel_name, *_ in notes:
         display_text = note_text if len(note_text) <= 200 else note_text[:197] + "..."
         display_text = escape_mrkdwn(display_text)
+        channel_suffix = f" — #{channel_name}" if channel_name else ""
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*Note {note_id}* — {created_at.strftime('%m/%d/%Y %H:%M')}"
+                        f"*#{note_id}* — {created_at.strftime('%m/%d/%Y %H:%M')}{channel_suffix}"
                         f"\n{display_text}"
                     ),
                 },
