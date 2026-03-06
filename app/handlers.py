@@ -278,7 +278,13 @@ def register_handlers(app):
 
             metadata = json.loads(view["private_metadata"])
             note_id = metadata["note_id"]
-            channel_id = metadata.get("channel_id") or user_id
+            raw_channel = metadata.get("channel_id") or ""
+            # Validate channel_id looks like a legitimate Slack channel/DM/group ID
+            # to prevent posting ephemeral messages to arbitrary channels.
+            if raw_channel and raw_channel[0] in ("C", "D", "G") and raw_channel.isalnum():
+                channel_id = raw_channel
+            else:
+                channel_id = user_id
 
             new_text = view["state"]["values"]["note_text_block"]["note_text"]["value"]
 
