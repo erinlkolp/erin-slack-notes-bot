@@ -65,8 +65,7 @@ def build_notes_blocks(notes, page, per_page, total_count):
     ]
 
     for note_id, note_text, created_at, channel_name, *_ in notes:
-        display_text = note_text if len(note_text) <= 200 else note_text[:197] + "..."
-        display_text = escape_mrkdwn(display_text)
+        display_text = escape_mrkdwn(note_text)
         channel_suffix = f" — #{escape_mrkdwn(channel_name)}" if channel_name else ""
         blocks.append(
             {
