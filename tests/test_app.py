@@ -94,14 +94,14 @@ class TestBuildNotesBlocks:
         assert result[1]["type"] == "context"
         assert "1 notes total" in result[1]["elements"][0]["text"]
 
-    def test_long_note_truncated(self):
+    def test_long_note_not_truncated(self):
         now = datetime(2025, 6, 15, 10, 30)
         long_text = "x" * 300
         result = blocks.build_notes_blocks([(1, long_text, now, None)], page=1, per_page=5, total_count=1)
         section = [b for b in result if b.get("type") == "section"][0]
         display = section["text"]["text"]
-        assert display.endswith("...")
-        assert "x" * 197 in display
+        assert "x" * 300 in display
+        assert "..." not in display
 
     def test_page_value_in_button_payload(self):
         result = blocks.build_notes_blocks(self._make_notes(5), page=1, per_page=5, total_count=10)
