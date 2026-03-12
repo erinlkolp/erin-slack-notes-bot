@@ -227,6 +227,12 @@ Shows all notes tagged `#work`.
 
 Shows notes that carry **both** `#work` and `#important` (AND semantics).
 
+```
+/notes_by_tag work|personal
+```
+
+Shows notes tagged with **either** `#work` or `#personal` (OR semantics).
+
 ### Limits
 
 | Constraint         | Value              |

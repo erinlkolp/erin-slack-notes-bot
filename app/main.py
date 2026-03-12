@@ -6,7 +6,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from .database import init_db_pool, verify_connection
+from .database import init_db_pool, verify_connection, close_db_pool
 from .handlers import register_handlers
 from .health import start_health_check_server
 
@@ -117,6 +117,7 @@ def main():
             logger.info("Received shutdown signal, stopping bot...")
             health_server.shutdown()
             handler.close()
+            close_db_pool()
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, shutdown_handler)

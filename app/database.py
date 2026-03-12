@@ -107,6 +107,28 @@ def verify_connection():
     return True
 
 
+def close_db_pool():
+    """Close all connections in the pool during graceful shutdown."""
+    global _db_pool
+    if _db_pool is None:
+        return
+    try:
+        # Drain pooled connections by acquiring and closing them.
+        # MySQLConnectionPool doesn't expose a close-all method, so we
+        # pull connections until the pool is empty.
+        for _ in range(DB_POOL_SIZE):
+            try:
+                conn = _db_pool.get_connection()
+                conn.close()
+            except Exception:
+                break
+        logger.info("Database connection pool closed")
+    except Exception as e:
+        logger.warning(f"Error closing database pool: {e}")
+    finally:
+        _db_pool = None
+
+
 def save_note(user_id, username, note_text, channel_id=None, channel_name=None):
     """Insert a note row and return its new ID, or False on error."""
     connection = None

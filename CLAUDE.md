@@ -164,7 +164,7 @@ Migrations are managed by **Liquibase** via `migrations/changelog-master.xml`. A
 | `/edit_note <id>` | Open modal to edit a note |
 | `/delete_note <id>` | Delete a note and its tags |
 | `/search_notes <query>` | Full-text search notes (LIKE-based) |
-| `/notes_by_tag [tag …]` | Filter notes by one or more tags (AND semantics); no args lists all your tags with counts |
+| `/notes_by_tag [tag …]` | Filter notes by one or more tags; space/comma-separated = AND, `\|`-separated = OR; no args lists all your tags with counts |
 
 ## CI/CD
 
