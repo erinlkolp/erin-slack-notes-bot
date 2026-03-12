@@ -61,11 +61,12 @@ def delete_tags_for_note(note_id):
             connection.close()
 
 
-def get_notes_by_tag(user_id, tags, page, per_page):
-    """Fetch a page of notes that carry ALL of the given tags (AND semantics).
+def get_notes_by_tag(user_id, tags, page, per_page, mode="and"):
+    """Fetch a page of notes filtered by tags.
 
     Args:
         tags: list of tag strings (without leading #). Must be non-empty.
+        mode: "and" requires ALL tags to be present, "or" requires ANY.
 
     Returns (notes_list, total_count) or (None, 0) on error.
     """
@@ -79,6 +80,7 @@ def get_notes_by_tag(user_id, tags, page, per_page):
 
         lowered = [t.lower() for t in tags]
         placeholders = ", ".join(["%s"] * len(lowered))
+        having_count = len(lowered) if mode == "and" else 1
 
         cursor.execute(
             "SELECT COUNT(*) FROM ("
@@ -86,9 +88,9 @@ def get_notes_by_tag(user_id, tags, page, per_page):
             "JOIN note_tags t ON n.id = t.note_id "
             f"WHERE n.user_id = %s AND t.tag IN ({placeholders}) "
             "GROUP BY n.id "
-            "HAVING COUNT(DISTINCT t.tag) = %s"
+            "HAVING COUNT(DISTINCT t.tag) >= %s"
             ") AS matching_notes",
-            [user_id] + lowered + [len(lowered)],
+            [user_id] + lowered + [having_count],
         )
         total_count = cursor.fetchone()[0]
 
@@ -98,9 +100,9 @@ def get_notes_by_tag(user_id, tags, page, per_page):
             "FROM notes n JOIN note_tags t ON n.id = t.note_id "
             f"WHERE n.user_id = %s AND t.tag IN ({placeholders}) "
             "GROUP BY n.id, n.note_text, n.created_at, n.channel_name "
-            "HAVING COUNT(DISTINCT t.tag) = %s "
+            "HAVING COUNT(DISTINCT t.tag) >= %s "
             "ORDER BY n.created_at DESC LIMIT %s OFFSET %s",
-            [user_id] + lowered + [len(lowered), per_page, offset],
+            [user_id] + lowered + [having_count, per_page, offset],
         )
         return cursor.fetchall(), total_count
 

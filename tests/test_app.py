@@ -788,3 +788,99 @@ class TestBuildEditNoteModal:
         modal = blocks.build_edit_note_modal(5, "text")
         meta = json.loads(modal["private_metadata"])
         assert meta["channel_id"] == ""
+
+
+# ── get_notes_by_tag OR mode ────────────────────────────────────────────────
+
+
+class TestGetNotesByTagOrMode:
+    def _make_mock_conn(self, fetchone_return, fetchall_return):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = fetchone_return
+        mock_cursor.fetchall.return_value = fetchall_return
+        mock_conn.cursor.return_value = mock_cursor
+        return mock_conn, mock_cursor
+
+    @patch("app.tags.get_db_connection")
+    def test_or_mode_uses_having_ge_one(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(3,),
+            fetchall_return=[(1, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["bug", "backend"], page=1, per_page=5, mode="or")
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        # OR mode: HAVING count >= 1 (not 2)
+        assert 1 in count_call_args[1]
+
+    @patch("app.tags.get_db_connection")
+    def test_and_mode_uses_having_eq_tag_count(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(1,),
+            fetchall_return=[(1, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["bug", "backend"], page=1, per_page=5, mode="and")
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        # AND mode: HAVING count >= 2 (number of tags)
+        assert 2 in count_call_args[1]
+
+    @patch("app.tags.get_db_connection")
+    def test_default_mode_is_and(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(1,),
+            fetchall_return=[(1, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["bug", "backend"], page=1, per_page=5)
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        assert 2 in count_call_args[1]
+
+
+# ── close_db_pool ────────────────────────────────────────────────────────────
+
+
+class TestCloseDbPool:
+    def setup_method(self):
+        self._orig_pool = database._db_pool
+
+    def teardown_method(self):
+        database._db_pool = self._orig_pool
+
+    def test_closes_all_connections(self):
+        mock_pool = MagicMock()
+        mock_conns = [MagicMock() for _ in range(config.DB_POOL_SIZE)]
+        mock_pool.get_connection.side_effect = mock_conns
+        database._db_pool = mock_pool
+
+        database.close_db_pool()
+
+        for conn in mock_conns:
+            conn.close.assert_called_once()
+        assert database._db_pool is None
+
+    def test_noop_when_pool_is_none(self):
+        database._db_pool = None
+        database.close_db_pool()  # should not raise
+        assert database._db_pool is None
+
+    def test_handles_partial_drain(self):
+        from mysql.connector import Error
+
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_pool.get_connection.side_effect = [mock_conn, Error("empty")]
+        database._db_pool = mock_pool
+
+        database.close_db_pool()
+
+        mock_conn.close.assert_called_once()
+        assert database._db_pool is None

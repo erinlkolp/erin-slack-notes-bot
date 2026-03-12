@@ -172,12 +172,20 @@ def register_handlers(app):
     def handle_notes_by_tag(ack, respond, command, logger):
         """List notes by tag(s).  Usage: /notes_by_tag [tag …]  (no arg = list all tags)
 
-        Multiple tags are space- or comma-separated; results must carry ALL tags.
+        Multiple tags separated by spaces or commas use AND (all must match).
+        Tags separated by | use OR (any may match).
         """
         try:
             user_id = command.get("user_id")
             raw = command.get("text", "").strip()
-            tags_input = [t.lstrip("#").lower() for t in raw.replace(",", " ").split() if t.lstrip("#")]
+
+            # Detect OR mode: presence of | anywhere in input
+            if "|" in raw:
+                mode = "or"
+                tags_input = [t.lstrip("#").lower() for t in raw.replace(",", " ").replace("|", " ").split() if t.lstrip("#")]
+            else:
+                mode = "and"
+                tags_input = [t.lstrip("#").lower() for t in raw.replace(",", " ").split() if t.lstrip("#")]
 
             if not tags_input:
                 user_tags = get_user_tags(user_id)
@@ -198,27 +206,30 @@ def register_handlers(app):
 
             page = 1
             per_page = NOTES_PER_PAGE
-            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page)
+            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page, mode)
 
             if notes is None:
                 respond("❌ Database connection error.")
                 return
 
-            tag_label = " ".join(f"#{t}" for t in tags_input)
+            joiner = " | " if mode == "or" else " "
+            tag_label = joiner.join(f"#{t}" for t in tags_input)
             if not notes:
                 respond(f"No notes found with tags *{tag_label}*.")
                 return
 
+            header_prefix = "Notes tagged" if mode == "and" else "Notes with any of"
             blocks = build_notes_blocks(notes, page, per_page, total_count)
             blocks[0] = {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"Notes tagged {tag_label}"},
+                "text": {"type": "plain_text", "text": f"{header_prefix} {tag_label}"},
             }
             for block in blocks:
                 if block.get("type") == "actions":
                     for element in block["elements"]:
                         payload = json.loads(element["value"])
                         payload["tags"] = tags_input
+                        payload["tag_mode"] = mode
                         element["value"] = json.dumps(payload)
                         if element["action_id"] == "notes_prev_page":
                             element["action_id"] = "tag_notes_prev_page"
@@ -449,22 +460,26 @@ def register_handlers(app):
             user_id = body["user"]["id"]
             payload = json.loads(body["actions"][0]["value"])
             page, per_page, tags_input = payload["page"], payload["per_page"], payload["tags"]
+            mode = payload.get("tag_mode", "and")
 
-            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page)
+            notes, total_count = get_notes_by_tag(user_id, tags_input, page, per_page, mode)
             if notes is None:
                 return
 
-            tag_label = " ".join(f"#{t}" for t in tags_input)
+            joiner = " | " if mode == "or" else " "
+            tag_label = joiner.join(f"#{t}" for t in tags_input)
+            header_prefix = "Notes tagged" if mode == "and" else "Notes with any of"
             blocks = build_notes_blocks(notes, page, per_page, total_count)
             blocks[0] = {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"Notes tagged {tag_label}"},
+                "text": {"type": "plain_text", "text": f"{header_prefix} {tag_label}"},
             }
             for block in blocks:
                 if block.get("type") == "actions":
                     for element in block["elements"]:
                         p = json.loads(element["value"])
                         p["tags"] = tags_input
+                        p["tag_mode"] = mode
                         element["value"] = json.dumps(p)
                         if element["action_id"] == "notes_prev_page":
                             element["action_id"] = "tag_notes_prev_page"
