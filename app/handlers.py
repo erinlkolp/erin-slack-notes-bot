@@ -6,9 +6,11 @@ from .config import MAX_NOTE_LENGTH, NOTES_PER_PAGE
 from .database import (
     delete_note,
     get_note_by_id,
+    get_note_stats,
     get_notes_page,
     save_note,
     search_notes,
+    toggle_pin_note,
     update_note,
 )
 from .tags import (
@@ -18,7 +20,7 @@ from .tags import (
     parse_tags,
     save_tags,
 )
-from .blocks import build_edit_note_modal, build_notes_blocks, escape_mrkdwn
+from .blocks import build_edit_note_modal, build_notes_blocks, build_stats_blocks, escape_mrkdwn
 from .middleware import allowed_user_id, require_allowed_user
 
 logger = logging.getLogger(__name__)
@@ -138,20 +140,24 @@ def register_handlers(app):
     @app.command("/my_notes")
     @require_allowed_user(command_name="my_notes")
     def handle_my_notes(ack, respond, command, logger):
-        """List notes with pagination.  Usage: /my_notes [per_page]"""
+        """List notes with pagination.  Usage: /my_notes [per_page] [sort:newest|oldest]"""
         try:
             user_id = command.get("user_id")
             user_name = command.get("user_name", "Unknown")
             text = command.get("text", "").strip()
 
-            try:
-                per_page = int(text) if text.isdigit() else NOTES_PER_PAGE
-                per_page = max(1, min(per_page, 20))
-            except (ValueError, TypeError):
-                per_page = NOTES_PER_PAGE
+            per_page = NOTES_PER_PAGE
+            sort = "newest"
+            for part in text.split():
+                if part.startswith("sort:"):
+                    sort_val = part[5:].lower()
+                    if sort_val in ("oldest", "newest"):
+                        sort = sort_val
+                elif part.isdigit():
+                    per_page = max(1, min(int(part), 20))
 
             page = 1
-            notes, total_count = get_notes_page(user_id, page, per_page)
+            notes, total_count = get_notes_page(user_id, page, per_page, sort=sort)
 
             if notes is None:
                 respond("Database connection error.")
@@ -161,7 +167,7 @@ def register_handlers(app):
                 respond(f"No notes found for {user_name}.")
                 return
 
-            respond(blocks=build_notes_blocks(notes, page, per_page, total_count))
+            respond(blocks=build_notes_blocks(notes, page, per_page, total_count, sort=sort))
 
         except Exception as e:
             logger.error(f"Error handling /my_notes command: {e}")
@@ -431,6 +437,59 @@ def register_handlers(app):
             logger.error(f"Error handling /search_notes command: {e}")
             respond("❌ An error occurred while searching your notes.")
 
+    @app.command("/note_stats")
+    @require_allowed_user(command_name="note_stats")
+    def handle_note_stats(ack, respond, command, logger):
+        """Show note usage statistics.  Usage: /note_stats"""
+        try:
+            user_id = command.get("user_id")
+            stats = get_note_stats(user_id)
+            if stats is None:
+                respond("❌ Database connection error.")
+                return
+            if stats["total_notes"] == 0:
+                respond("No notes yet. Save your first note with `/take_notes`.")
+                return
+            respond(blocks=build_stats_blocks(stats))
+        except Exception as e:
+            logger.error(f"Error handling /note_stats command: {e}")
+            respond("❌ An error occurred while fetching your stats.")
+
+    @app.command("/pin_note")
+    @require_allowed_user(command_name="pin_note")
+    def handle_pin_note(ack, respond, command, logger):
+        """Toggle pinned state on a note.  Usage: /pin_note <note_id>"""
+        try:
+            user_id = command.get("user_id")
+            text = command.get("text", "").strip()
+
+            if not text:
+                respond(
+                    "❌ Please provide a note ID.\n"
+                    "Usage: `/pin_note <note_id>`"
+                )
+                return
+
+            try:
+                note_id = int(text.split()[0])
+            except ValueError:
+                respond("❌ Invalid note ID. Usage: `/pin_note <note_id>`")
+                return
+
+            new_state = toggle_pin_note(note_id, user_id)
+            if new_state is None:
+                respond(f"❌ Note #{note_id} not found or doesn't belong to you.")
+                return
+
+            verb = "pinned" if new_state else "unpinned"
+            icon = "📌" if new_state else "🔓"
+            respond(f"{icon} Note #{note_id} {verb}.")
+            logger.info(f"Note {note_id} {verb} by user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling /pin_note command: {e}")
+            respond("❌ An error occurred while toggling pin. Please try again.")
+
     # ── Pagination action handlers ────────────────────────────────────────
 
     @app.action("notes_prev_page")
@@ -441,11 +500,12 @@ def register_handlers(app):
         try:
             user_id = body["user"]["id"]
             payload = json.loads(body["actions"][0]["value"])
-            notes, total_count = get_notes_page(user_id, payload["page"], payload["per_page"])
+            sort = payload.get("sort", "newest")
+            notes, total_count = get_notes_page(user_id, payload["page"], payload["per_page"], sort=sort)
             if notes is None:
                 return
             respond(
-                blocks=build_notes_blocks(notes, payload["page"], payload["per_page"], total_count),
+                blocks=build_notes_blocks(notes, payload["page"], payload["per_page"], total_count, sort=sort),
                 replace_original=True,
             )
         except Exception as e:

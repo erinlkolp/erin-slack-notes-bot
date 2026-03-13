@@ -107,7 +107,7 @@ class TestBuildNotesBlocks:
         result = blocks.build_notes_blocks(self._make_notes(5), page=1, per_page=5, total_count=10)
         action_blocks = [b for b in result if b.get("type") == "actions"]
         payload = json.loads(action_blocks[0]["elements"][0]["value"])
-        assert payload == {"page": 2, "per_page": 5}
+        assert payload == {"page": 2, "per_page": 5, "sort": "newest"}
 
     def test_note_text_mentions_are_escaped(self):
         """Slack mention/broadcast syntax in note text must be escaped in mrkdwn output."""
@@ -884,3 +884,201 @@ class TestCloseDbPool:
 
         mock_conn.close.assert_called_once()
         assert database._db_pool is None
+
+
+# ── toggle_pin_note ───────────────────────────────────────────────────────────
+
+
+class TestTogglePinNote:
+    @patch("app.database.get_db_connection")
+    def test_pins_unpinned_note(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 1
+        mock_cursor.fetchone.return_value = (1,)
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        assert database.toggle_pin_note(1, "U1") is True
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.database.get_db_connection")
+    def test_unpins_pinned_note(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 1
+        mock_cursor.fetchone.return_value = (0,)
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        assert database.toggle_pin_note(1, "U1") is False
+
+    @patch("app.database.get_db_connection")
+    def test_returns_none_when_note_not_found(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        assert database.toggle_pin_note(999, "U1") is None
+
+    @patch("app.database.get_db_connection")
+    def test_returns_none_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        assert database.toggle_pin_note(1, "U1") is None
+
+
+# ── get_note_stats ────────────────────────────────────────────────────────────
+
+
+class TestGetNoteStats:
+    @patch("app.database.get_db_connection")
+    def test_returns_stats_dict_on_success(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        now = datetime.now()
+        mock_cursor.fetchone.side_effect = [
+            (10, now, now),  # total_notes, oldest, newest
+            (2,),            # pinned_count
+            (4,),            # total_tags
+        ]
+        mock_cursor.fetchall.side_effect = [
+            [("meeting", 5), ("todo", 3)],  # top_tags
+            [("general", 7)],               # top_channels
+        ]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        stats = database.get_note_stats("U1")
+
+        assert stats["total_notes"] == 10
+        assert stats["pinned_count"] == 2
+        assert stats["total_tags"] == 4
+        assert len(stats["top_tags"]) == 2
+        assert stats["top_tags"][0] == ("meeting", 5)
+        assert len(stats["top_channels"]) == 1
+
+    @patch("app.database.get_db_connection")
+    def test_returns_none_on_no_connection(self, mock_get_conn):
+        mock_get_conn.return_value = None
+        assert database.get_note_stats("U1") is None
+
+    @patch("app.database.get_db_connection")
+    def test_handles_zero_notes(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_conn.is_connected.return_value = True
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.side_effect = [
+            (0, None, None),
+            (0,),
+            (0,),
+        ]
+        mock_cursor.fetchall.side_effect = [[], []]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        stats = database.get_note_stats("U1")
+
+        assert stats["total_notes"] == 0
+        assert stats["oldest"] is None
+        assert stats["top_tags"] == []
+
+
+# ── build_stats_blocks ────────────────────────────────────────────────────────
+
+
+class TestBuildStatsBlocks:
+    def _make_stats(self, total=10, pinned=2, total_tags=3, oldest=None, newest=None,
+                    top_tags=None, top_channels=None):
+        return {
+            "total_notes": total,
+            "pinned_count": pinned,
+            "total_tags": total_tags,
+            "oldest": oldest or datetime(2024, 1, 1),
+            "newest": newest or datetime(2025, 3, 1),
+            "top_tags": top_tags if top_tags is not None else [("meeting", 5), ("todo", 2)],
+            "top_channels": top_channels if top_channels is not None else [("general", 7)],
+        }
+
+    def test_returns_header_block(self):
+        result = blocks.build_stats_blocks(self._make_stats())
+        assert result[0]["type"] == "header"
+        assert "Stats" in result[0]["text"]["text"]
+
+    def test_includes_total_note_count(self):
+        result = blocks.build_stats_blocks(self._make_stats(total=42))
+        fields_block = next(b for b in result if b.get("type") == "section" and "fields" in b)
+        all_text = " ".join(f["text"] for f in fields_block["fields"])
+        assert "42" in all_text
+
+    def test_includes_pinned_count(self):
+        result = blocks.build_stats_blocks(self._make_stats(pinned=3))
+        fields_block = next(b for b in result if b.get("type") == "section" and "fields" in b)
+        all_text = " ".join(f["text"] for f in fields_block["fields"])
+        assert "3" in all_text
+
+    def test_top_tags_section_present_when_tags_exist(self):
+        result = blocks.build_stats_blocks(self._make_stats(top_tags=[("bug", 4)]))
+        text_blocks = [b for b in result if b.get("type") == "section" and "text" in b]
+        combined = " ".join(b["text"]["text"] for b in text_blocks)
+        assert "#bug" in combined
+
+    def test_top_tags_section_absent_when_no_tags(self):
+        result = blocks.build_stats_blocks(self._make_stats(top_tags=[]))
+        text_blocks = [b for b in result if b.get("type") == "section" and "text" in b]
+        combined = " ".join(b["text"]["text"] for b in text_blocks)
+        assert "Top Tags" not in combined
+
+    def test_top_channels_section_present_when_channels_exist(self):
+        result = blocks.build_stats_blocks(self._make_stats(top_channels=[("general", 5)]))
+        text_blocks = [b for b in result if b.get("type") == "section" and "text" in b]
+        combined = " ".join(b["text"]["text"] for b in text_blocks)
+        assert "#general" in combined
+
+    def test_top_channels_absent_when_no_channels(self):
+        result = blocks.build_stats_blocks(self._make_stats(top_channels=[]))
+        text_blocks = [b for b in result if b.get("type") == "section" and "text" in b]
+        combined = " ".join(b["text"]["text"] for b in text_blocks)
+        assert "Top Channels" not in combined
+
+    def test_date_range_uses_none_fallback(self):
+        result = blocks.build_stats_blocks(self._make_stats(oldest=None, newest=None) | {"oldest": None, "newest": None})
+        fields_block = next(b for b in result if b.get("type") == "section" and "fields" in b)
+        all_text = " ".join(f["text"] for f in fields_block["fields"])
+        assert "—" in all_text
+
+
+# ── build_notes_blocks pinned indicator ──────────────────────────────────────
+
+
+class TestBuildNotesBlocksPinned:
+    def test_pinned_note_shows_pin_emoji(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(1, "pinned note", now, None, 1)], page=1, per_page=5, total_count=1)
+        section = next(b for b in result if b.get("type") == "section")
+        assert "📌" in section["text"]["text"]
+
+    def test_unpinned_note_no_pin_emoji(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(1, "regular note", now, None, 0)], page=1, per_page=5, total_count=1)
+        section = next(b for b in result if b.get("type") == "section")
+        assert "📌" not in section["text"]["text"]
+
+    def test_four_tuple_note_defaults_to_unpinned(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        result = blocks.build_notes_blocks([(1, "old format", now, None)], page=1, per_page=5, total_count=1)
+        section = next(b for b in result if b.get("type") == "section")
+        assert "📌" not in section["text"]["text"]
+
+    def test_sort_preserved_in_button_payload(self):
+        now = datetime(2025, 6, 15, 10, 30)
+        notes = [(i, f"note {i}", now, None) for i in range(1, 6)]
+        result = blocks.build_notes_blocks(notes, page=1, per_page=5, total_count=10, sort="oldest")
+        action_blocks = [b for b in result if b.get("type") == "actions"]
+        payload = json.loads(action_blocks[0]["elements"][0]["value"])
+        assert payload["sort"] == "oldest"

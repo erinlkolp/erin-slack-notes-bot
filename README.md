@@ -5,7 +5,9 @@ A Slack bot that lets you save, retrieve, and browse personal notes directly fro
 ## Features
 
 - **Save notes** with `/take_notes` — stores text along with timestamp and channel context
-- **Browse notes** with `/my_notes` — paginated view with interactive Previous/Next buttons
+- **Browse notes** with `/my_notes` — paginated view with interactive Previous/Next buttons; supports custom page size and `sort:newest`/`sort:oldest` ordering
+- **Pin notes** with `/pin_note` — toggle a sticky 📌 flag on any note so it floats to the top of browse results
+- **Stats dashboard** with `/note_stats` — see total notes, pinned count, tags used, top tags, top channels, and date range at a glance
 - **Edit notes** with `/edit_note` — update any note's text (tags are re-parsed automatically)
 - **Delete notes** with `/delete_note` — remove a note and its tags
 - **Search notes** with `/search_notes` — find notes by keyword with paginated results
@@ -40,6 +42,8 @@ A Slack bot that lets you save, retrieve, and browse personal notes directly fro
    - `/delete_note` — Delete a note
    - `/search_notes` — Search notes by keyword
    - `/notes_by_tag` — Browse notes by tag
+   - `/pin_note` — Pin or unpin a note
+   - `/note_stats` — View your notes usage summary
 7. Find your Slack User ID (click your profile > three dots > "Copy member ID")
 
 ## Installation
@@ -147,10 +151,11 @@ If you prefer to run without Docker, you'll need Python 3.12+ and a running MySQ
    export MYSQL_DATABASE=slack_notes
    ```
 
-3. **Initialize the database** by running the migration SQL against your MySQL server:
+3. **Initialize the database** by running the migration SQL files against your MySQL server:
 
    ```bash
    mysql -u root -p < migrations/001-initial-schema.sql
+   mysql -u root -p < migrations/002-add-pinned-column.sql
    ```
 
 4. **Start the bot:**
@@ -175,13 +180,17 @@ The bot responds with a confirmation showing the note ID, text, timestamp, and c
 /my_notes
 ```
 
-Shows your most recent notes (5 per page by default) with Previous/Next buttons for pagination.
+Shows your most recent notes (5 per page by default) with Previous/Next buttons for pagination. Pinned notes always appear first.
 
-You can specify a custom page size (1-20):
+You can specify a custom page size (1–20) and sort order:
 
 ```
 /my_notes 10
+/my_notes sort:oldest
+/my_notes 10 sort:oldest
 ```
+
+The default sort order is `newest` (most recent first). Sort is preserved as you page through results.
 
 ### Editing a Note
 
@@ -232,6 +241,27 @@ Shows notes that carry **both** `#work` and `#important` (AND semantics).
 ```
 
 Shows notes tagged with **either** `#work` or `#personal` (OR semantics).
+
+### Pinning a Note
+
+```
+/pin_note 42
+```
+
+Toggles the pinned state of note #42. Pinned notes show a 📌 indicator and sort to the top of `/my_notes` results regardless of sort order. Running the command again unpins the note.
+
+### Viewing Stats
+
+```
+/note_stats
+```
+
+Displays a summary dashboard showing:
+- Total note count and number currently pinned
+- Number of distinct tags used
+- Date of your oldest and most recent note
+- Top 5 tags by frequency
+- Top 5 channels where notes were saved
 
 ### Limits
 

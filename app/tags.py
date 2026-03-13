@@ -96,10 +96,10 @@ def get_notes_by_tag(user_id, tags, page, per_page, mode="and"):
 
         offset = (page - 1) * per_page
         cursor.execute(
-            "SELECT n.id, n.note_text, n.created_at, n.channel_name "
+            "SELECT n.id, n.note_text, n.created_at, n.channel_name, n.pinned "
             "FROM notes n JOIN note_tags t ON n.id = t.note_id "
             f"WHERE n.user_id = %s AND t.tag IN ({placeholders}) "
-            "GROUP BY n.id, n.note_text, n.created_at, n.channel_name "
+            "GROUP BY n.id, n.note_text, n.created_at, n.channel_name, n.pinned "
             "HAVING COUNT(DISTINCT t.tag) >= %s "
             "ORDER BY n.created_at DESC LIMIT %s OFFSET %s",
             [user_id] + lowered + [having_count, per_page, offset],

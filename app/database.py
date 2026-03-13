@@ -234,8 +234,11 @@ def delete_note(note_id, user_id):
             connection.close()
 
 
-def get_notes_page(user_id, page, per_page):
-    """Fetch one page of notes for a user. Returns (notes_list, total_count)."""
+def get_notes_page(user_id, page, per_page, sort="newest"):
+    """Fetch one page of notes for a user. Returns (notes_list, total_count).
+
+    sort: 'newest' (default) or 'oldest'. Pinned notes always sort first.
+    """
     connection = None
     cursor = None
     try:
@@ -247,10 +250,12 @@ def get_notes_page(user_id, page, per_page):
         cursor.execute("SELECT COUNT(*) FROM notes WHERE user_id = %s", (user_id,))
         total_count = cursor.fetchone()[0]
 
+        order_dir = "ASC" if sort == "oldest" else "DESC"
         offset = (page - 1) * per_page
         cursor.execute(
-            "SELECT id, note_text, created_at, channel_name "
-            "FROM notes WHERE user_id = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            "SELECT id, note_text, created_at, channel_name, pinned "
+            "FROM notes WHERE user_id = %s "
+            f"ORDER BY pinned DESC, created_at {order_dir} LIMIT %s OFFSET %s",
             (user_id, per_page, offset),
         )
         return cursor.fetchall(), total_count
@@ -286,7 +291,7 @@ def search_notes(user_id, keyword, page, per_page):
 
         offset = (page - 1) * per_page
         cursor.execute(
-            "SELECT id, note_text, created_at, channel_name "
+            "SELECT id, note_text, created_at, channel_name, pinned "
             "FROM notes WHERE user_id = %s AND note_text LIKE %s ESCAPE '\\\\' "
             "ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (user_id, like_pattern, per_page, offset),
@@ -296,6 +301,109 @@ def search_notes(user_id, keyword, page, per_page):
     except Error as e:
         logger.error(f"Database error in search_notes: {e}")
         return None, 0
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def toggle_pin_note(note_id, user_id):
+    """Toggle the pinned state of a note.
+
+    Returns True (now pinned), False (now unpinned), or None if not found / on error.
+    """
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return None
+        cursor = connection.cursor()
+        cursor.execute(
+            "UPDATE notes SET pinned = 1 - pinned WHERE id = %s AND user_id = %s",
+            (note_id, user_id),
+        )
+        connection.commit()
+        if cursor.rowcount == 0:
+            return None
+        cursor.execute(
+            "SELECT pinned FROM notes WHERE id = %s AND user_id = %s",
+            (note_id, user_id),
+        )
+        row = cursor.fetchone()
+        return bool(row[0]) if row else None
+    except Error as e:
+        logger.error(f"Error toggling pin for note {note_id}: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def get_note_stats(user_id):
+    """Fetch usage statistics for a user.
+
+    Returns a dict with keys: total_notes, pinned_count, oldest, newest,
+    total_tags, top_tags, top_channels. Returns None on error.
+    """
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if connection is None:
+            return None
+        cursor = connection.cursor()
+
+        cursor.execute(
+            "SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM notes WHERE user_id = %s",
+            (user_id,),
+        )
+        total_notes, oldest, newest = cursor.fetchone()
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM notes WHERE user_id = %s AND pinned = 1",
+            (user_id,),
+        )
+        pinned_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT COUNT(DISTINCT t.tag) FROM note_tags t "
+            "JOIN notes n ON n.id = t.note_id WHERE n.user_id = %s",
+            (user_id,),
+        )
+        total_tags = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT t.tag, COUNT(*) as cnt FROM note_tags t "
+            "JOIN notes n ON n.id = t.note_id "
+            "WHERE n.user_id = %s GROUP BY t.tag ORDER BY cnt DESC LIMIT 5",
+            (user_id,),
+        )
+        top_tags = cursor.fetchall()
+
+        cursor.execute(
+            "SELECT channel_name, COUNT(*) as cnt FROM notes "
+            "WHERE user_id = %s AND channel_name IS NOT NULL "
+            "GROUP BY channel_name ORDER BY cnt DESC LIMIT 5",
+            (user_id,),
+        )
+        top_channels = cursor.fetchall()
+
+        return {
+            "total_notes": total_notes,
+            "pinned_count": pinned_count,
+            "oldest": oldest,
+            "newest": newest,
+            "total_tags": total_tags,
+            "top_tags": top_tags,
+            "top_channels": top_channels,
+        }
+    except Error as e:
+        logger.error(f"Database error in get_note_stats: {e}")
+        return None
     finally:
         if cursor:
             cursor.close()
