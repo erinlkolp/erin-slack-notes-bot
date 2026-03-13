@@ -60,9 +60,16 @@ Authorization is single-user only, enforced via `ALLOWED_SLACK_USER_ID`. Every s
 - Tags are stored separately in `note_tags` with a FK cascade on delete.
 - When updating a note, always call `delete_tags_for_note()` then `save_tags()` — never update tags in place.
 
+### Pinned Notes
+- `pinned` is a `TINYINT(1)` column on `notes`, toggled by `toggle_pin_note(note_id, user_id)` in `app/database.py` using `1 - pinned`.
+- `get_notes_page` always orders by `pinned DESC` first, then `created_at` in the requested direction, so pinned notes float to the top regardless of sort.
+- All note-listing queries (`get_notes_page`, `search_notes`, `get_notes_by_tag`) include `pinned` in their SELECT so `build_notes_blocks` can render the 📌 indicator.
+- `build_notes_blocks` unpacks pinned via `*extra` on the note tuple — passing 4-tuples (no pinned column) is safe and defaults to unpinned.
+
 ### Pagination
 - Browse and search results page at `NOTES_PER_PAGE = 5` items.
-- Page state (offset, query params) is serialized as JSON into Slack action `value` fields. Keep pagination payloads compact.
+- Page state (offset, query params, and `sort`) is serialized as JSON into Slack action `value` fields. Keep pagination payloads compact.
+- The `sort` value (`"newest"` or `"oldest"`) is carried in the nav button payload for `/my_notes` and read back by `handle_notes_pagination` so the sort order is preserved across pages.
 
 ### Slack UI
 - Use `app/blocks.py` functions to build all UI output. Return blocks, not plain text, for list responses.
@@ -137,9 +144,11 @@ CREATE TABLE notes (
   created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   channel_id  VARCHAR(50),
   channel_name VARCHAR(100),
+  pinned      TINYINT(1)   NOT NULL DEFAULT 0,
   INDEX idx_user_id (user_id),
   INDEX idx_created_at (created_at),
-  INDEX idx_user_created (user_id, created_at)
+  INDEX idx_user_created (user_id, created_at),
+  INDEX idx_pinned (pinned)
 );
 
 -- note_tags table
@@ -153,14 +162,20 @@ CREATE TABLE note_tags (
 );
 ```
 
-Migrations are managed by **Liquibase** via `migrations/changelog-master.xml`. Add new migrations as numbered SQL files and register them in the changelog — do not modify existing migration files.
+Migrations are managed by **Liquibase** via `migrations/changelog-master.xml`. Current migrations:
+- `001-initial-schema.sql` — creates `notes` and `note_tags` tables
+- `002-add-pinned-column.sql` — adds `pinned TINYINT(1) NOT NULL DEFAULT 0` column and index to `notes`
+
+Add new migrations as numbered SQL files and register them in the changelog — do not modify existing migration files.
 
 ## Slash Commands
 
 | Command | Description |
 |---|---|
 | `/take_notes <text>` | Save a new note (supports `#tags`) |
-| `/my_notes [per_page]` | Browse all notes with pagination (optional per_page 1–20, default 5) |
+| `/my_notes [per_page] [sort:newest\|oldest]` | Browse all notes with pagination (optional per_page 1–20, default 5; optional sort, default newest; pinned notes always sort first) |
+| `/pin_note <id>` | Toggle pinned state on a note; pinned notes show 📌 and float to the top of `/my_notes` |
+| `/note_stats` | Show usage dashboard: total notes, pinned count, tags used, top tags, top channels, date range |
 | `/edit_note <id>` | Open modal to edit a note |
 | `/delete_note <id>` | Delete a note and its tags |
 | `/search_notes <query>` | Full-text search notes (LIKE-based) |
