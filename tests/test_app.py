@@ -1113,6 +1113,9 @@ class FakeBoltApp:
         self.commands = {}
         self.actions = {}
         self.views = {}
+        self.messages = {}
+        self.events = {}
+        self.error_handler = None
 
     def command(self, name):
         def decorator(fn):
@@ -1134,15 +1137,18 @@ class FakeBoltApp:
 
     def message(self, pattern):
         def decorator(fn):
+            self.messages[pattern] = fn
             return fn
         return decorator
 
     def event(self, event_type):
         def decorator(fn):
+            self.events[event_type] = fn
             return fn
         return decorator
 
     def error(self, fn):
+        self.error_handler = fn
         return fn
 
 
@@ -1177,6 +1183,92 @@ SLASH_COMMANDS = [
     "/note_stats",
     "/pin_note",
 ]
+
+
+# ── Message / mention listeners ───────────────────────────────────────────────
+#
+# These two handlers aren't decorated with @require_allowed_user — they check
+# middleware.allowed_user_id by hand — so authorization needs direct coverage.
+
+
+class TestMessageListener:
+    def setup_method(self):
+        self.app = _build_test_app()
+        self.fn = self.app.messages[".*"]
+
+    def test_allowed_user_dm_gets_confirmation(self):
+        say = MagicMock()
+        call_handler(
+            self.fn, message={"user": "U_ALLOWED", "channel": "D1"}, say=say, logger=MagicMock()
+        )
+        say.assert_called_once_with("✅ Message received!")
+
+    def test_unauthorized_user_ignored(self):
+        say = MagicMock()
+        call_handler(
+            self.fn, message={"user": "U_OTHER", "channel": "D1"}, say=say, logger=MagicMock()
+        )
+        say.assert_not_called()
+
+    def test_bot_id_present_ignored(self):
+        say = MagicMock()
+        call_handler(
+            self.fn, message={"user": "U_ALLOWED", "channel": "D1", "bot_id": "B1"},
+            say=say, logger=MagicMock(),
+        )
+        say.assert_not_called()
+
+    def test_bot_message_subtype_ignored(self):
+        say = MagicMock()
+        call_handler(
+            self.fn,
+            message={"user": "U_ALLOWED", "channel": "D1", "subtype": "bot_message"},
+            say=say, logger=MagicMock(),
+        )
+        say.assert_not_called()
+
+    def test_exception_is_caught_and_logged(self):
+        say = MagicMock(side_effect=RuntimeError("boom"))
+        logger = MagicMock()
+        call_handler(
+            self.fn, message={"user": "U_ALLOWED", "channel": "D1"}, say=say, logger=logger
+        )
+        logger.error.assert_called_once()
+
+
+class TestMentionListener:
+    def setup_method(self):
+        self.app = _build_test_app()
+        self.fn = self.app.events["app_mention"]
+
+    def test_allowed_user_gets_greeting_with_cleaned_text(self):
+        say = MagicMock()
+        call_handler(
+            self.fn, event={"user": "U_ALLOWED", "text": "<@BOTID> hello there"},
+            say=say, logger=MagicMock(),
+        )
+        text = say.call_args[0][0]
+        assert "hello there" in text
+        assert "<@BOTID>" not in text
+
+    def test_unauthorized_user_ignored(self):
+        say = MagicMock()
+        call_handler(
+            self.fn, event={"user": "U_OTHER", "text": "<@BOTID> hello"},
+            say=say, logger=MagicMock(),
+        )
+        say.assert_not_called()
+
+    def test_text_without_mention_prefix_used_as_is(self):
+        say = MagicMock()
+        call_handler(self.fn, event={"user": "U_ALLOWED", "text": "hello"}, say=say, logger=MagicMock())
+        assert "hello" in say.call_args[0][0]
+
+    def test_exception_is_caught_and_logged(self):
+        say = MagicMock(side_effect=RuntimeError("boom"))
+        logger = MagicMock()
+        call_handler(self.fn, event={"user": "U_ALLOWED", "text": "hi"}, say=say, logger=logger)
+        logger.error.assert_called_once()
 
 
 class TestSlashCommandAuthorization:
@@ -1297,6 +1389,18 @@ class TestTakeNotesHandler:
         )
         mock_save_note.assert_called_once_with("U_ALLOWED", "erin", "no tags", "C1", None)
 
+    @patch("app.handlers.save_note")
+    def test_exception_reports_generic_error(self, mock_save_note):
+        mock_save_note.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        client = MagicMock()
+        client.conversations_info.return_value = {"channel": {"name": "general"}}
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="hello"),
+            client=client, logger=MagicMock(),
+        )
+        assert "An error occurred while saving" in respond.call_args[0][0]
+
 
 class TestMyNotesHandler:
     def setup_method(self):
@@ -1351,6 +1455,19 @@ class TestMyNotesHandler:
         )
         assert mock_get_notes.call_args[0][2] == 3
         assert mock_get_notes.call_args.kwargs["sort"] == "oldest"
+
+    @patch("app.handlers.get_notes_page")
+    def test_minimum_per_page_clamped(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="0"), logger=MagicMock())
+        assert mock_get_notes.call_args[0][2] == 1
+
+    @patch("app.handlers.get_notes_page")
+    def test_exception_reports_generic_error(self, mock_get_notes):
+        mock_get_notes.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "An error occurred while retrieving" in respond.call_args[0][0]
 
 
 class TestNotesByTagHandler:
@@ -1438,6 +1555,31 @@ class TestNotesByTagHandler:
         assert payload["tags"] == ["work"]
         assert payload["tag_mode"] == "and"
 
+    @patch("app.handlers.get_notes_by_tag")
+    def test_pagination_action_ids_renamed_for_or_mode(self, mock_get_notes):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_get_notes.return_value = ([(i, f"note {i}", now, None, 0) for i in range(1, 6)], 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="work|urgent"),
+            logger=MagicMock(),
+        )
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["text"]["text"] == "Notes with any of #work | #urgent"
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        ids = [el["action_id"] for el in action_block["elements"]]
+        assert ids == ["tag_notes_next_page"]
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["tags"] == ["work", "urgent"]
+        assert payload["tag_mode"] == "or"
+
+    @patch("app.handlers.get_user_tags")
+    def test_exception_reports_generic_error(self, mock_get_user_tags):
+        mock_get_user_tags.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "An error occurred while retrieving" in respond.call_args[0][0]
+
 
 class TestEditNoteHandler:
     def setup_method(self):
@@ -1489,6 +1631,161 @@ class TestEditNoteHandler:
         meta = json.loads(view["private_metadata"])
         assert meta["note_id"] == 42
 
+    @patch("app.handlers.get_note_by_id")
+    def test_exception_reports_generic_error(self, mock_get_note):
+        mock_get_note.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        assert "An error occurred while opening the edit modal" in respond.call_args[0][0]
+
+
+def make_view(note_id=42, text="updated text", channel_id=""):
+    return {
+        "private_metadata": json.dumps({"note_id": note_id, "channel_id": channel_id}),
+        "state": {"values": {"note_text_block": {"note_text": {"value": text}}}},
+    }
+
+
+class TestEditNoteModalHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.views["edit_note_modal"]
+
+    def test_too_long_text_rejected(self):
+        ack = MagicMock()
+        long_text = "x" * (config.MAX_NOTE_LENGTH + 1)
+        call_handler(
+            self.fn, ack=ack, body={"user": {"id": "U_ALLOWED"}}, view=make_view(text=long_text),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        kwargs = ack.call_args.kwargs
+        assert kwargs["response_action"] == "errors"
+        assert "too long" in kwargs["errors"]["note_text_block"]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_note_not_found(self, mock_get_note):
+        mock_get_note.return_value = None
+        ack = MagicMock()
+        call_handler(
+            self.fn, ack=ack, body={"user": {"id": "U_ALLOWED"}}, view=make_view(),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        kwargs = ack.call_args.kwargs
+        assert kwargs["response_action"] == "errors"
+        assert "not found" in kwargs["errors"]["note_text_block"]
+
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_update_failure_reported(self, mock_get_note, mock_update):
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = False
+        ack = MagicMock()
+        call_handler(
+            self.fn, ack=ack, body={"user": {"id": "U_ALLOWED"}}, view=make_view(),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        kwargs = ack.call_args.kwargs
+        assert kwargs["response_action"] == "errors"
+        assert "Failed to update" in kwargs["errors"]["note_text_block"]
+
+    @patch("app.handlers.save_tags")
+    @patch("app.handlers.delete_tags_for_note")
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_successful_update_with_tags(self, mock_get_note, mock_update, mock_delete_tags, mock_save_tags):
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = True
+        ack = MagicMock()
+        client = MagicMock()
+        call_handler(
+            self.fn, ack=ack, body={"user": {"id": "U_ALLOWED"}},
+            view=make_view(text="new text #done", channel_id="C12345"),
+            client=client, logger=MagicMock(),
+        )
+        mock_update.assert_called_once_with(42, "U_ALLOWED", "new text #done")
+        mock_delete_tags.assert_called_once_with(42)
+        mock_save_tags.assert_called_once_with(42, ["done"])
+        ack.assert_called_once_with()
+        post_kwargs = client.chat_postEphemeral.call_args.kwargs
+        assert post_kwargs["channel"] == "C12345"
+        assert post_kwargs["user"] == "U_ALLOWED"
+        assert "#done" in post_kwargs["text"]
+
+    @patch("app.handlers.save_tags")
+    @patch("app.handlers.delete_tags_for_note")
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_successful_update_without_tags_skips_save_tags(
+        self, mock_get_note, mock_update, mock_delete_tags, mock_save_tags
+    ):
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = True
+        client = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), body={"user": {"id": "U_ALLOWED"}},
+            view=make_view(text="no tags here", channel_id="C12345"),
+            client=client, logger=MagicMock(),
+        )
+        mock_delete_tags.assert_called_once_with(42)
+        mock_save_tags.assert_not_called()
+
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_valid_channel_id_used_for_confirmation(self, mock_get_note, mock_update):
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = True
+        client = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), body={"user": {"id": "U_ALLOWED"}},
+            view=make_view(channel_id="D98765"),
+            client=client, logger=MagicMock(),
+        )
+        assert client.chat_postEphemeral.call_args.kwargs["channel"] == "D98765"
+
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_malformed_channel_id_falls_back_to_user_id(self, mock_get_note, mock_update):
+        """A channel_id that doesn't look like a real Slack channel/DM/group ID must
+        not be trusted — fall back to the submitting user's own ID."""
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = True
+        client = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), body={"user": {"id": "U_ALLOWED"}},
+            view=make_view(channel_id="X not-a-real-channel"),
+            client=client, logger=MagicMock(),
+        )
+        assert client.chat_postEphemeral.call_args.kwargs["channel"] == "U_ALLOWED"
+
+    @patch("app.handlers.update_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_empty_channel_id_falls_back_to_user_id(self, mock_get_note, mock_update):
+        mock_get_note.return_value = (42, "old text", datetime.now(), None)
+        mock_update.return_value = True
+        client = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), body={"user": {"id": "U_ALLOWED"}},
+            view=make_view(channel_id=""),
+            client=client, logger=MagicMock(),
+        )
+        assert client.chat_postEphemeral.call_args.kwargs["channel"] == "U_ALLOWED"
+
+    @patch("app.handlers.get_note_by_id")
+    def test_exception_acks_generic_error(self, mock_get_note):
+        mock_get_note.side_effect = RuntimeError("boom")
+        ack = MagicMock()
+        call_handler(
+            self.fn, ack=ack, body={"user": {"id": "U_ALLOWED"}}, view=make_view(),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        kwargs = ack.call_args.kwargs
+        assert kwargs["response_action"] == "errors"
+        assert "unexpected error" in kwargs["errors"]["note_text_block"]
+
 
 class TestDeleteNoteHandler:
     def setup_method(self):
@@ -1533,6 +1830,13 @@ class TestDeleteNoteHandler:
         call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
         mock_delete.assert_called_once_with(42, "U_ALLOWED")
         assert "deleted" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_exception_reports_generic_error(self, mock_get_note):
+        mock_get_note.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        assert "An error occurred while deleting" in respond.call_args[0][0]
 
 
 class TestSearchNotesHandler:
@@ -1580,6 +1884,15 @@ class TestSearchNotesHandler:
         payload = json.loads(action_block["elements"][0]["value"])
         assert payload["keyword"] == "meeting"
 
+    @patch("app.handlers.search_notes")
+    def test_exception_reports_generic_error(self, mock_search):
+        mock_search.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="meeting"), logger=MagicMock(),
+        )
+        assert "An error occurred while searching" in respond.call_args[0][0]
+
 
 class TestNoteStatsHandler:
     def setup_method(self):
@@ -1616,6 +1929,13 @@ class TestNoteStatsHandler:
         call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
         blocks_arg = respond.call_args.kwargs["blocks"]
         assert blocks_arg[0]["type"] == "header"
+
+    @patch("app.handlers.get_note_stats")
+    def test_exception_reports_generic_error(self, mock_stats):
+        mock_stats.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "An error occurred while fetching" in respond.call_args[0][0]
 
 
 class TestPinNoteHandler:
@@ -1656,3 +1976,210 @@ class TestPinNoteHandler:
         call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
         text = respond.call_args[0][0]
         assert "🔓" in text and "unpinned" in text
+
+    @patch("app.handlers.toggle_pin_note")
+    def test_exception_reports_generic_error(self, mock_toggle):
+        mock_toggle.side_effect = RuntimeError("boom")
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        assert "An error occurred while toggling pin" in respond.call_args[0][0]
+
+
+# ── Pagination action handlers ────────────────────────────────────────────────
+
+
+def make_action_body(payload, user_id="U_ALLOWED"):
+    return {"user": {"id": user_id}, "actions": [{"value": json.dumps(payload)}]}
+
+
+def _paged_notes(count=5):
+    now = datetime(2025, 6, 15, 10, 30)
+    return [(i, f"note {i}", now, None, 0) for i in range(1, count + 1)]
+
+
+class TestNotesPaginationAction:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.actions["notes_prev_page"]
+        assert self.app.actions["notes_next_page"] is self.fn
+
+    @patch("app.handlers.get_notes_page")
+    def test_renders_page_with_sort_preserved(self, mock_get_notes):
+        mock_get_notes.return_value = (_paged_notes(), 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 2, "per_page": 5, "sort": "oldest"}),
+        )
+        mock_get_notes.assert_called_once_with("U_ALLOWED", 2, 5, sort="oldest")
+        assert respond.call_args.kwargs["replace_original"] is True
+        payload = json.loads(
+            next(b for b in respond.call_args.kwargs["blocks"] if b.get("type") == "actions")
+            ["elements"][0]["value"]
+        )
+        assert payload["sort"] == "oldest"
+
+    @patch("app.handlers.get_notes_page")
+    def test_defaults_sort_to_newest_when_missing(self, mock_get_notes):
+        mock_get_notes.return_value = (_paged_notes(), 12)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), logger=MagicMock(),
+            body=make_action_body({"page": 1, "per_page": 5}),
+        )
+        assert mock_get_notes.call_args.kwargs["sort"] == "newest"
+
+    @patch("app.handlers.get_notes_page")
+    def test_db_error_does_not_respond(self, mock_get_notes):
+        mock_get_notes.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 1, "per_page": 5}),
+        )
+        respond.assert_not_called()
+
+    @patch("app.handlers.get_notes_page")
+    def test_exception_is_caught_and_logged(self, mock_get_notes):
+        mock_get_notes.side_effect = RuntimeError("boom")
+        logger = MagicMock()
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=logger,
+            body=make_action_body({"page": 1, "per_page": 5}),
+        )
+        respond.assert_not_called()
+        logger.error.assert_called_once()
+
+
+class TestTagNotesPaginationAction:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.actions["tag_notes_prev_page"]
+        assert self.app.actions["tag_notes_next_page"] is self.fn
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_and_mode_header_and_action_ids(self, mock_get_notes):
+        mock_get_notes.return_value = (_paged_notes(), 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 2, "per_page": 5, "tags": ["work"], "tag_mode": "and"}),
+        )
+        mock_get_notes.assert_called_once_with("U_ALLOWED", ["work"], 2, 5, "and")
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["text"]["text"] == "Notes tagged #work"
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        ids = [el["action_id"] for el in action_block["elements"]]
+        assert ids == ["tag_notes_prev_page", "tag_notes_next_page"]
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["tags"] == ["work"]
+        assert payload["tag_mode"] == "and"
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_or_mode_header_and_payload(self, mock_get_notes):
+        mock_get_notes.return_value = (_paged_notes(), 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 2, "per_page": 5, "tags": ["work", "urgent"], "tag_mode": "or"}),
+        )
+        mock_get_notes.assert_called_once_with("U_ALLOWED", ["work", "urgent"], 2, 5, "or")
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["text"]["text"] == "Notes with any of #work | #urgent"
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["tag_mode"] == "or"
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_defaults_to_and_mode_when_missing(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), logger=MagicMock(),
+            body=make_action_body({"page": 1, "per_page": 5, "tags": ["work"]}),
+        )
+        assert mock_get_notes.call_args[0][4] == "and"
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_db_error_does_not_respond(self, mock_get_notes):
+        mock_get_notes.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 1, "per_page": 5, "tags": ["work"], "tag_mode": "and"}),
+        )
+        respond.assert_not_called()
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_exception_is_caught_and_logged(self, mock_get_notes):
+        mock_get_notes.side_effect = RuntimeError("boom")
+        logger = MagicMock()
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=logger,
+            body=make_action_body({"page": 1, "per_page": 5, "tags": ["work"], "tag_mode": "and"}),
+        )
+        respond.assert_not_called()
+        logger.error.assert_called_once()
+
+
+class TestSearchNotesPaginationAction:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.actions["search_notes_prev_page"]
+        assert self.app.actions["search_notes_next_page"] is self.fn
+
+    @patch("app.handlers.search_notes")
+    def test_keyword_carried_through_and_header(self, mock_search):
+        mock_search.return_value = (_paged_notes(), 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 2, "per_page": 5, "keyword": "meeting"}),
+        )
+        mock_search.assert_called_once_with("U_ALLOWED", "meeting", 2, 5)
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["text"]["text"] == "Search: meeting"
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        ids = [el["action_id"] for el in action_block["elements"]]
+        assert ids == ["search_notes_prev_page", "search_notes_next_page"]
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["keyword"] == "meeting"
+        assert respond.call_args.kwargs["replace_original"] is True
+
+    @patch("app.handlers.search_notes")
+    def test_db_error_does_not_respond(self, mock_search):
+        mock_search.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=MagicMock(),
+            body=make_action_body({"page": 1, "per_page": 5, "keyword": "meeting"}),
+        )
+        respond.assert_not_called()
+
+    @patch("app.handlers.search_notes")
+    def test_exception_is_caught_and_logged(self, mock_search):
+        mock_search.side_effect = RuntimeError("boom")
+        logger = MagicMock()
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, logger=logger,
+            body=make_action_body({"page": 1, "per_page": 5, "keyword": "meeting"}),
+        )
+        respond.assert_not_called()
+        logger.error.assert_called_once()
+
+
+# ── Global error handler ──────────────────────────────────────────────────────
+
+
+class TestGlobalErrorHandler:
+    def setup_method(self):
+        self.app = _build_test_app()
+
+    def test_logs_without_raising(self):
+        logger = MagicMock()
+        self.app.error_handler(error=RuntimeError("boom"), body={}, logger=logger)
+        logger.error.assert_called_once()
