@@ -4,6 +4,7 @@ Each test class targets a specific module (database, tags, blocks, middleware,
 health) so imports are clean and patches point to the right namespace.
 """
 
+import inspect
 import json
 import time
 from datetime import datetime
@@ -22,6 +23,7 @@ from app import tags
 from app import blocks
 from app import middleware
 from app import health
+from app.handlers import register_handlers
 
 # Set the allowed user that middleware reads at import time.
 middleware.allowed_user_id = "U_ALLOWED"
@@ -660,6 +662,21 @@ class TestGetNotesByTag:
         assert total == 0
 
     @patch("app.tags.get_db_connection")
+    def test_duplicate_tags_deduplicated_for_and_semantics(self, mock_get_conn):
+        now = datetime.now()
+        mock_conn, mock_cursor = self._make_mock_conn(
+            fetchone_return=(1,),
+            fetchall_return=[(1, "note", now, None)],
+        )
+        mock_get_conn.return_value = mock_conn
+
+        tags.get_notes_by_tag("U1", ["bug", "bug"], page=1, per_page=5)
+        count_call_args = mock_cursor.execute.call_args_list[0][0]
+        # HAVING count must reflect distinct tags only — a duplicate tag in
+        # the input shouldn't require two matches for a note tagged once.
+        assert count_call_args[1][-1] == 1
+
+    @patch("app.tags.get_db_connection")
     def test_pagination_offset_applied(self, mock_get_conn):
         now = datetime.now()
         mock_conn, mock_cursor = self._make_mock_conn(
@@ -1082,3 +1099,560 @@ class TestBuildNotesBlocksPinned:
         action_blocks = [b for b in result if b.get("type") == "actions"]
         payload = json.loads(action_blocks[0]["elements"][0]["value"])
         assert payload["sort"] == "oldest"
+
+
+# ── Slash command handlers (register_handlers) ───────────────────────────────
+#
+# FakeBoltApp stands in for slack_bolt.App: it just records the functions
+# passed to @app.command/@app.action/@app.view so tests can invoke the real
+# decorated handlers (including the require_allowed_user wrapper) directly.
+
+
+class FakeBoltApp:
+    def __init__(self):
+        self.commands = {}
+        self.actions = {}
+        self.views = {}
+
+    def command(self, name):
+        def decorator(fn):
+            self.commands[name] = fn
+            return fn
+        return decorator
+
+    def action(self, action_id):
+        def decorator(fn):
+            self.actions[action_id] = fn
+            return fn
+        return decorator
+
+    def view(self, callback_id):
+        def decorator(fn):
+            self.views[callback_id] = fn
+            return fn
+        return decorator
+
+    def message(self, pattern):
+        def decorator(fn):
+            return fn
+        return decorator
+
+    def event(self, event_type):
+        def decorator(fn):
+            return fn
+        return decorator
+
+    def error(self, fn):
+        return fn
+
+
+def _build_test_app():
+    app = FakeBoltApp()
+    register_handlers(app)
+    return app
+
+
+def make_command(text="", user_id="U_ALLOWED", user_name="erin", channel_id="C1"):
+    return {
+        "user_id": user_id,
+        "user_name": user_name,
+        "text": text,
+        "channel_id": channel_id,
+    }
+
+
+def call_handler(fn, **kwargs):
+    """Invoke a registered handler with only the kwargs its real signature accepts."""
+    accepted = inspect.signature(fn).parameters
+    return fn(**{k: v for k, v in kwargs.items() if k in accepted})
+
+
+SLASH_COMMANDS = [
+    "/take_notes",
+    "/my_notes",
+    "/notes_by_tag",
+    "/edit_note",
+    "/delete_note",
+    "/search_notes",
+    "/note_stats",
+    "/pin_note",
+]
+
+
+class TestSlashCommandAuthorization:
+    """Every slash command must reject unauthorized users before touching the DB."""
+
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+
+    @pytest.mark.parametrize("command_name", SLASH_COMMANDS)
+    def test_unauthorized_user_is_blocked(self, command_name):
+        fn = self.app.commands[command_name]
+        respond = MagicMock()
+        call_handler(
+            fn,
+            ack=MagicMock(),
+            respond=respond,
+            command=make_command(text="1", user_id="U_OTHER"),
+            client=MagicMock(),
+            logger=MagicMock(),
+        )
+        respond.assert_called_once()
+        assert "restricted" in respond.call_args[0][0]
+
+
+class TestSlashCommandRateLimiting:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+
+    @patch("app.handlers.toggle_pin_note")
+    def test_rapid_repeat_command_is_rate_limited(self, mock_toggle):
+        mock_toggle.return_value = True
+        fn = self.app.commands["/pin_note"]
+        respond = MagicMock()
+        call_handler(fn, ack=MagicMock(), respond=respond, command=make_command(text="1"), logger=MagicMock())
+        call_handler(fn, ack=MagicMock(), respond=respond, command=make_command(text="1"), logger=MagicMock())
+        assert mock_toggle.call_count == 1
+        assert "wait" in respond.call_args[0][0].lower()
+
+
+class TestTakeNotesHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/take_notes"]
+
+    @patch("app.handlers.save_note")
+    def test_empty_text_rejected(self, mock_save):
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        mock_save.assert_not_called()
+        assert "provide some text" in respond.call_args[0][0]
+
+    @patch("app.handlers.save_note")
+    def test_note_too_long_rejected(self, mock_save):
+        respond = MagicMock()
+        long_text = "x" * (config.MAX_NOTE_LENGTH + 1)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text=long_text),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        mock_save.assert_not_called()
+        assert "too long" in respond.call_args[0][0]
+
+    @patch("app.handlers.save_tags")
+    @patch("app.handlers.save_note")
+    def test_saves_note_and_tags(self, mock_save_note, mock_save_tags):
+        mock_save_note.return_value = 7
+        respond = MagicMock()
+        client = MagicMock()
+        client.conversations_info.return_value = {"channel": {"name": "general"}}
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="ship it #release"),
+            client=client, logger=MagicMock(),
+        )
+        mock_save_note.assert_called_once_with("U_ALLOWED", "erin", "ship it #release", "C1", "general")
+        mock_save_tags.assert_called_once_with(7, ["release"])
+        response_text = respond.call_args[0][0]
+        assert "Note ID: 7" in response_text
+        assert "#release" in response_text
+
+    @patch("app.handlers.save_tags")
+    @patch("app.handlers.save_note")
+    def test_no_tags_skips_save_tags(self, mock_save_note, mock_save_tags):
+        mock_save_note.return_value = 3
+        client = MagicMock()
+        client.conversations_info.return_value = {"channel": {"name": "general"}}
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="no tags here"),
+            client=client, logger=MagicMock(),
+        )
+        mock_save_tags.assert_not_called()
+
+    @patch("app.handlers.save_note")
+    def test_db_error_reports_failure(self, mock_save_note):
+        mock_save_note.return_value = False
+        respond = MagicMock()
+        client = MagicMock()
+        client.conversations_info.return_value = {"channel": {"name": "general"}}
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="hello"),
+            client=client, logger=MagicMock(),
+        )
+        assert "error saving" in respond.call_args[0][0]
+
+    @patch("app.handlers.save_note")
+    def test_channel_lookup_failure_does_not_block_save(self, mock_save_note):
+        mock_save_note.return_value = 9
+        client = MagicMock()
+        client.conversations_info.side_effect = RuntimeError("no channel access")
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="no tags"),
+            client=client, logger=MagicMock(),
+        )
+        mock_save_note.assert_called_once_with("U_ALLOWED", "erin", "no tags", "C1", None)
+
+
+class TestMyNotesHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/my_notes"]
+
+    @patch("app.handlers.get_notes_page")
+    def test_db_error(self, mock_get_notes):
+        mock_get_notes.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "Database connection error" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_notes_page")
+    def test_no_notes_found(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "No notes found for erin" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_notes_page")
+    def test_default_paging_and_sort(self, mock_get_notes):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_get_notes.return_value = ([(1, "note", now, None, 0)], 1)
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        mock_get_notes.assert_called_once_with("U_ALLOWED", 1, config.NOTES_PER_PAGE, sort="newest")
+        assert "blocks" in respond.call_args.kwargs
+
+    @patch("app.handlers.get_notes_page")
+    def test_custom_per_page_clamped(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="50"), logger=MagicMock())
+        assert mock_get_notes.call_args[0][2] == 20
+
+    @patch("app.handlers.get_notes_page")
+    def test_sort_oldest_parsed(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="sort:oldest"),
+            logger=MagicMock(),
+        )
+        assert mock_get_notes.call_args.kwargs["sort"] == "oldest"
+
+    @patch("app.handlers.get_notes_page")
+    def test_per_page_and_sort_combined(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="3 sort:oldest"),
+            logger=MagicMock(),
+        )
+        assert mock_get_notes.call_args[0][2] == 3
+        assert mock_get_notes.call_args.kwargs["sort"] == "oldest"
+
+
+class TestNotesByTagHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/notes_by_tag"]
+
+    @patch("app.handlers.get_user_tags")
+    def test_no_args_lists_tags(self, mock_get_user_tags):
+        mock_get_user_tags.return_value = [("work", 3), ("bug", 1)]
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        text = respond.call_args[0][0]
+        assert "#work" in text and "#bug" in text
+
+    @patch("app.handlers.get_user_tags")
+    def test_no_args_db_error(self, mock_get_user_tags):
+        mock_get_user_tags.return_value = None
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "Database connection error" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_user_tags")
+    def test_no_args_no_tags_yet(self, mock_get_user_tags):
+        mock_get_user_tags.return_value = []
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "No tags found" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_and_mode_for_space_separated_tags(self, mock_get_notes):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_get_notes.return_value = ([(1, "note", now, None, 0)], 1)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="work urgent"),
+            logger=MagicMock(),
+        )
+        args = mock_get_notes.call_args[0]
+        assert args[1] == ["work", "urgent"]
+        assert args[4] == "and"
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_or_mode_for_pipe_separated_tags(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=make_command(text="work|urgent"),
+            logger=MagicMock(),
+        )
+        args = mock_get_notes.call_args[0]
+        assert args[1] == ["work", "urgent"]
+        assert args[4] == "or"
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_db_error_on_filtered_lookup(self, mock_get_notes):
+        mock_get_notes.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="work"), logger=MagicMock(),
+        )
+        assert "Database connection error" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_no_matching_notes(self, mock_get_notes):
+        mock_get_notes.return_value = ([], 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="ghost"), logger=MagicMock(),
+        )
+        assert "No notes found with tags" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_notes_by_tag")
+    def test_pagination_action_ids_renamed_for_tag_filter(self, mock_get_notes):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_get_notes.return_value = ([(i, f"note {i}", now, None, 0) for i in range(1, 6)], 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="work"), logger=MagicMock(),
+        )
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        ids = [el["action_id"] for el in action_block["elements"]]
+        assert ids == ["tag_notes_next_page"]
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["tags"] == ["work"]
+        assert payload["tag_mode"] == "and"
+
+
+class TestEditNoteHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/edit_note"]
+
+    def test_missing_note_id(self):
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        assert "provide a note ID" in respond.call_args[0][0]
+
+    def test_invalid_note_id(self):
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="abc"),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        assert "Invalid note ID" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_note_not_found(self, mock_get_note):
+        mock_get_note.return_value = None
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"),
+            client=MagicMock(), logger=MagicMock(),
+        )
+        assert "not found" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_opens_modal_with_current_text(self, mock_get_note):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_get_note.return_value = (42, "current note text", now, "general")
+        client = MagicMock()
+        command = make_command(text="42")
+        command["trigger_id"] = "T1"
+        call_handler(
+            self.fn, ack=MagicMock(), respond=MagicMock(), command=command, client=client, logger=MagicMock(),
+        )
+        client.views_open.assert_called_once()
+        kwargs = client.views_open.call_args.kwargs
+        assert kwargs["trigger_id"] == "T1"
+        view = kwargs["view"]
+        assert view["callback_id"] == "edit_note_modal"
+        meta = json.loads(view["private_metadata"])
+        assert meta["note_id"] == 42
+
+
+class TestDeleteNoteHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/delete_note"]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_missing_note_id(self, mock_get_note):
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "Usage" in respond.call_args[0][0]
+        mock_get_note.assert_not_called()
+
+    def test_invalid_note_id(self):
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="abc"), logger=MagicMock())
+        assert "Invalid note ID" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_by_id")
+    def test_note_not_found(self, mock_get_note):
+        mock_get_note.return_value = None
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        assert "not found" in respond.call_args[0][0]
+
+    @patch("app.handlers.delete_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_delete_failure_reported(self, mock_get_note, mock_delete):
+        mock_get_note.return_value = (42, "text", datetime.now(), None)
+        mock_delete.return_value = False
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        assert "Failed to delete" in respond.call_args[0][0]
+
+    @patch("app.handlers.delete_note")
+    @patch("app.handlers.get_note_by_id")
+    def test_successful_delete(self, mock_get_note, mock_delete):
+        mock_get_note.return_value = (42, "text", datetime.now(), None)
+        mock_delete.return_value = True
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        mock_delete.assert_called_once_with(42, "U_ALLOWED")
+        assert "deleted" in respond.call_args[0][0]
+
+
+class TestSearchNotesHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/search_notes"]
+
+    def test_missing_keyword(self):
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "provide a search term" in respond.call_args[0][0]
+
+    @patch("app.handlers.search_notes")
+    def test_db_error(self, mock_search):
+        mock_search.return_value = (None, 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="meeting"), logger=MagicMock(),
+        )
+        assert "Database connection error" in respond.call_args[0][0]
+
+    @patch("app.handlers.search_notes")
+    def test_no_matches(self, mock_search):
+        mock_search.return_value = ([], 0)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="meeting"), logger=MagicMock(),
+        )
+        assert "No notes found matching" in respond.call_args[0][0]
+
+    @patch("app.handlers.search_notes")
+    def test_matches_rename_pagination_action_ids(self, mock_search):
+        now = datetime(2025, 6, 15, 10, 30)
+        mock_search.return_value = ([(i, f"note {i}", now, None, 0) for i in range(1, 6)], 12)
+        respond = MagicMock()
+        call_handler(
+            self.fn, ack=MagicMock(), respond=respond, command=make_command(text="meeting"), logger=MagicMock(),
+        )
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["text"]["text"] == "Search: meeting"
+        action_block = next(b for b in blocks_arg if b.get("type") == "actions")
+        ids = [el["action_id"] for el in action_block["elements"]]
+        assert ids == ["search_notes_next_page"]
+        payload = json.loads(action_block["elements"][0]["value"])
+        assert payload["keyword"] == "meeting"
+
+
+class TestNoteStatsHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/note_stats"]
+
+    @patch("app.handlers.get_note_stats")
+    def test_db_error(self, mock_stats):
+        mock_stats.return_value = None
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "Database connection error" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_stats")
+    def test_zero_notes(self, mock_stats):
+        mock_stats.return_value = {"total_notes": 0}
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "No notes yet" in respond.call_args[0][0]
+
+    @patch("app.handlers.get_note_stats")
+    def test_stats_rendered(self, mock_stats):
+        mock_stats.return_value = {
+            "total_notes": 5,
+            "pinned_count": 1,
+            "total_tags": 2,
+            "oldest": datetime(2025, 1, 1),
+            "newest": datetime(2025, 6, 1),
+            "top_tags": [("work", 3)],
+            "top_channels": [("general", 4)],
+        }
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        blocks_arg = respond.call_args.kwargs["blocks"]
+        assert blocks_arg[0]["type"] == "header"
+
+
+class TestPinNoteHandler:
+    def setup_method(self):
+        middleware._last_command_time.clear()
+        self.app = _build_test_app()
+        self.fn = self.app.commands["/pin_note"]
+
+    def test_missing_note_id(self):
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text=""), logger=MagicMock())
+        assert "provide a note ID" in respond.call_args[0][0]
+
+    def test_invalid_note_id(self):
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="abc"), logger=MagicMock())
+        assert "Invalid note ID" in respond.call_args[0][0]
+
+    @patch("app.handlers.toggle_pin_note")
+    def test_note_not_found(self, mock_toggle):
+        mock_toggle.return_value = None
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        assert "not found" in respond.call_args[0][0]
+
+    @patch("app.handlers.toggle_pin_note")
+    def test_pins_note(self, mock_toggle):
+        mock_toggle.return_value = True
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        text = respond.call_args[0][0]
+        assert "📌" in text and "pinned" in text
+
+    @patch("app.handlers.toggle_pin_note")
+    def test_unpins_note(self, mock_toggle):
+        mock_toggle.return_value = False
+        respond = MagicMock()
+        call_handler(self.fn, ack=MagicMock(), respond=respond, command=make_command(text="42"), logger=MagicMock())
+        text = respond.call_args[0][0]
+        assert "🔓" in text and "unpinned" in text
