@@ -78,7 +78,7 @@ def get_notes_by_tag(user_id, tags, page, per_page, mode="and"):
             return None, 0
         cursor = connection.cursor()
 
-        lowered = [t.lower() for t in tags]
+        lowered = list(dict.fromkeys(t.lower() for t in tags))
         placeholders = ", ".join(["%s"] * len(lowered))
         having_count = len(lowered) if mode == "and" else 1
 
